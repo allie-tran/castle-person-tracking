@@ -1,4 +1,8 @@
 from PIL import Image
+import os
+import cv2
+import base64
+import requests
 import numpy as np
 import random
 from inputimeout import inputimeout, TimeoutOccurred
@@ -196,3 +200,24 @@ def putText(frame, text, pos, color):
     text_x = pos[0] - text_size[0] // 2
     text_y = pos[1] - int(text_size[1] * TEXT_Y_OFFSET_SCALE)
     cv2.putText(frame, text, (text_x, text_y), font, font_scale, color, thickness)
+
+
+def get_captions_from_frames(frames: list[str], instruction: str):
+    # convert to base64
+    images = []
+    for frame in frames:
+        _, buffer = cv2.imencode('.jpg', frame)  # type: ignore
+        base64_frame = base64.b64encode(buffer).decode('utf-8')
+        images.append(base64_frame)
+
+    response = requests.post("http://localhost:8080/describe", json={"images": images, "instruction": instruction})
+    if response.status_code != 200:
+        raise Exception(f"Error in captioning service: {response.text}")
+    return response.json().get("description", "").strip()
+
+static_cameras = ["Kitchen", "Living1", "Living2", "Meeting", "Reading"]
+def get_prompt_for_camera(camera):
+    if camera in static_cameras:
+        return f"Describe the scene in this room: {camera}."
+    return f"Assuming the camera wearer is {camera}, describe what they are doing in this scene."
+
