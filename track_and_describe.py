@@ -535,6 +535,9 @@ try:
                 current_frames, get_prompt_for_camera(person)
             )
             descriptions.append((segment_id, shot_segments[segment_id][0], description))
+            print(
+                f"Segment {segment_id} description: {description}"
+            )
             # New segment, increment segment_id
             segment_id += 1
 
