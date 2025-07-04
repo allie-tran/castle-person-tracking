@@ -10,6 +10,7 @@ from rich import print as rprint
 
 from people_tracking.face_encoding import get_default_classifier
 from people_tracking.face_reid import assign_faces_per_frame
+from people_tracking.gather_subtitles import gather_subtitles, get_subtitles_for_day
 from people_tracking.utils import (
     create_metadata_file,
     get_captions_from_frames,
@@ -75,13 +76,13 @@ parser.add_argument(
     help="Overwrite existing metadata files",
 )
 args = parser.parse_args()
-IMAGE_FOLDER_PATH = args.image_folder
 OUTPUT_FOLDER_PATH = args.output_folder
 day = args.day
 person = args.person
 key = f"{day}_{person}"
 shot_segment_key = f"{day}/{person}"
 image_path = f"/mnt/castle/castle_downloader/keyframes/{day}/{person}"
+IMAGE_FOLDER_PATH = image_path
 
 # Ensure the image folder exists
 if not os.path.exists(IMAGE_FOLDER_PATH):
@@ -208,8 +209,10 @@ def webp_name_to_jpg_name(webp_name):
     """
     Convert a webp image name to jpg format.
     """
+    webp_name = webp_name.split(".")[0]
     day, person, time = webp_name.split("/")
     hour, seconds = time.split("_")
+    seconds = int(seconds)
     # 2fps for jpg
     return [f"{day}/{person}/{hour}_{seconds * 2}.jpg",
             f"{day}/{person}/{hour}_{seconds * 2 + 1}.jpg"]
@@ -231,13 +234,29 @@ if not shot_segments:
     )
     exit(1)
 
+print("[blue]Shot segments loaded:[/blue]")
+for segment in shot_segments[:10]:
+    print(segment)
+
+frame_to_segment = {}
+# Create a mapping from frame index to segment ID
+for segment_id, segment in enumerate(shot_segments):
+    for frame_name in segment:
+        # Extract the frame index from the filename
+        frame_to_segment[frame_name] = segment_id
+
+# Load subttitles
+subtitles = get_subtitles_for_day(day, person)
+
 # --- MAIN IMAGE PROCESSING LOOP ---
 track_id_to_names = defaultdict(list)
 track_id_to_frames = defaultdict(list)  # Track ID to list of frame indices
 to_skips = set()  # Set to track skipped frames
 to_skips_path = os.path.join(metadata_dir, "to_skips.txt")
 segment_id = 0
-
+print(
+    f"[blue]Processing images from {IMAGE_FOLDER_PATH} with {len(image_paths)} images...[/blue]"
+)
 if not metadata_exists:
     # Dictionary to accumulate names per YOLO track ID
     pbar = tqdm(total=len(image_paths), desc="Creating track IDs", unit="image(s)")
@@ -450,7 +469,6 @@ clustered_track_ids = merge_track_ids(
 print(
     f"Clustered {len(clustered_track_ids)} track IDs based on features and temporal proximity."
 )
-rprint(clustered_track_ids)
 
 # Create name for clusters
 cluster_to_names = defaultdict(str)
@@ -489,8 +507,9 @@ mask_video = cv2.VideoWriter(
 )
 
 rprint(f"[blue]Output video will be saved to {out_video_path}[/blue]")
-segment_id = 0
-current_frames = []
+current_segment_id = 0
+current_frames: list[str] = []  # List to store frames for the current segment
+current_overlays: list[np.ndarray] = []
 descriptions = []
 try:
     current_frame_idx = 0
@@ -498,7 +517,13 @@ try:
     segmented_frame = np.zeros_like(frame, dtype=np.uint8)
     alpha = 0.5  # Transparency factor for overlay
 
-    for row in tqdm(tracking_data):
+    pbr = tqdm(
+        total=len(tracking_data),
+        desc="Processing frames",
+        unit="frame(s)",
+    )
+    for row in tracking_data:
+        pbr.update(1)
         frame_id = row["frame_id"]
 
         done = False
@@ -508,18 +533,37 @@ try:
                 continue
 
             current_frame_idx += 1
-
             # save the current frame with the previous row's data
             # add mask to the frame (overlay)
             overlay = cv2.addWeighted(frame, 1, segmented_frame, alpha, 0)
             # Write the final frame to the output video
             overlay_video.write(overlay)
             mask_video.write(segmented_frame)
-            current_frames.append(overlay)
+            current_overlays.append(overlay)
+            current_frames.append(image_paths[current_frame_idx - 1])
 
             if current_frame_idx < len(image_paths):
                 frame = cv2.imread(image_paths[current_frame_idx])
                 segmented_frame = np.zeros_like(frame, dtype=np.uint8)
+                # Check if we have move to the next segment
+                img_key = image_paths[current_frame_idx].split("/")[-3:]
+                img_key = "/".join(img_key)
+                segment_id = frame_to_segment.get(img_key, current_segment_id)
+                if segment_id != current_segment_id:
+                    pbr.set_description(
+                        f"Getting description for segment {segment_id} ({len(current_frames)} frames)"
+                    )
+                    description = get_captions_from_frames(
+                        current_overlays, get_prompt_for_camera(person, gather_subtitles(current_frames, subtitles))
+                    )
+                    descriptions.append((segment_id, shot_segments[segment_id][0], description))
+                    print(
+                        f"Segment {segment_id} description: {description}"
+                    )
+                    # New segment, increment segment_id
+                    current_segment_id = segment_id
+                    current_frames = []  # Reset current frames for the new segment
+                    current_overlays = []  # Reset current overlays for the new segment
             else:
                 print("No more frames to process.")
                 done = True
@@ -527,19 +571,6 @@ try:
         if done:
             break
 
-        # Check if we have move to the next segment
-        img_key = image_path.split("/")[-3:]
-        img_key = "/".join(img_key)
-        if img_key not in shot_segments[segment_id]:
-            description = get_captions_from_frames(
-                current_frames, get_prompt_for_camera(person)
-            )
-            descriptions.append((segment_id, shot_segments[segment_id][0], description))
-            print(
-                f"Segment {segment_id} description: {description}"
-            )
-            # New segment, increment segment_id
-            segment_id += 1
 
         track_id = row["track_id"]
         person_bbox = row["bbox"]
@@ -602,10 +633,10 @@ mask_video.release()
 cv2.destroyAllWindows()
 
 # Write the final segment description
-if current_frames:
+if current_overlays:
     description = get_captions_from_frames(
-        current_frames, get_prompt_for_camera(person)
-    )
+        current_overlays, get_prompt_for_camera(person, gather_subtitles(current_frames, person)
+    ))
     descriptions.append((segment_id, shot_segments[segment_id][0], description))
 # Save the segment descriptions in a csv file
 import csv

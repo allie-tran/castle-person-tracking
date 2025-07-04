@@ -1,7 +1,8 @@
 from PIL import Image
+import shutil
+import tempfile
 import os
 import cv2
-import base64
 import requests
 import numpy as np
 import random
@@ -11,6 +12,7 @@ import cv2
 import os
 import imagehash
 from .colors import PEOPLE_COLORS
+from .llm import LLM, MixedContent, get_openai_visual_messages
 
 placeholder_hash = imagehash.phash(
     Image.open("/mnt/castle/processed/placeholder.png")
@@ -160,7 +162,8 @@ def create_metadata_file(
 
             if y != "y":
                 print("Exiting without overwriting the metadata file.")
-            return True
+                return True
+
         os.remove(os.path.join(metadata_dir, "metadata.csv"))
 
     csv_file = open(os.path.join(metadata_dir, "metadata.csv"), "w", newline="")
@@ -201,23 +204,40 @@ def putText(frame, text, pos, color):
     text_y = pos[1] - int(text_size[1] * TEXT_Y_OFFSET_SCALE)
     cv2.putText(frame, text, (text_x, text_y), font, font_scale, color, thickness)
 
+llm = LLM()
 
-def get_captions_from_frames(frames: list[str], instruction: str):
-    # convert to base64
-    images = []
-    for frame in frames:
-        _, buffer = cv2.imencode('.jpg', frame)  # type: ignore
-        base64_frame = base64.b64encode(buffer).decode('utf-8')
-        images.append(base64_frame)
+def get_captions_from_frames(cv_frames: list[np.ndarray], instruction: str) -> str:
+    image_bytes = []
+    for _, frame in enumerate(cv_frames):
+        # Convert the frame to RGB format
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # Convert the RGB frame to bytes
+        _, buffer = cv2.imencode('.jpg', frame_rgb)
+        image_bytes.append(buffer.tobytes())
 
-    response = requests.post("http://localhost:8080/describe", json={"images": images, "instruction": instruction})
-    if response.status_code != 200:
-        raise Exception(f"Error in captioning service: {response.text}")
-    return response.json().get("description", "").strip()
+    messages = [
+        MixedContent(
+            type="text",
+            content=instruction
+        )
+    ]
+
+    messages += get_openai_visual_messages(
+        image_paths=image_bytes
+    )
+
+    description = llm.generate_from_mixed_media(messages)
+    if not description:
+        return ""
+    assert type(description) is str, "LLM did not return a string"
+    return description
+
 
 static_cameras = ["Kitchen", "Living1", "Living2", "Meeting", "Reading"]
-def get_prompt_for_camera(camera):
+persons = ["Stevan", "Bjorn", "Allie", "Cathal", "Luca", "Florian", "Onanong", "Bao", "Linh", "Tien", "Werner", "Klaus"]
+def get_prompt_for_camera(camera, subtitles):
     if camera in static_cameras:
-        return f"Describe the scene in this room: {camera}."
-    return f"Assuming the camera wearer is {camera}, describe what they are doing in this scene."
+        return f"Describe the scene in this room: {camera}. The people are {', '.join(persons)}. Return an empty string if you do not know. Here are some spoken subtitles: {subtitles}"
+
+    return f"Assuming the camera wearer is {camera}, describe what they are doing in this scene in maximum 3 sentences. If there are people, use their names if known. Start the sentences with names. [Person A] is doing [action]. [Person B] is doing [action]. The people are {', '.join(persons)}. Return an empty string if you do no know. Here are some spoken subtitles: {subtitles}"
 
