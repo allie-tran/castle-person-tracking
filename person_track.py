@@ -385,7 +385,6 @@ features = features.reshape(features.shape[0], -1)  # Ensure 2D shape
 print(f"Extracted features shape: {features.shape}")
 
 
-
 # clustered_track_ids = cluster_track_ids_time_filtered(
 #     features,
 #     [row["track_id"] for row in tracking_data],

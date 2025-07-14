@@ -10,14 +10,13 @@ from tqdm import tqdm
 
 load_dotenv()
 PROCESSED_DIR = os.getenv("PROCESSED_DIR")
-ROOT_DIR = "/mnt/castle/keyframes/keyframe"
+KEYFRAMES_DIR = os.getenv("KEYFRAMES_DIR")
 assert PROCESSED_DIR is not None, "PROCESSED_DIR is not set in .env file"
-assert ROOT_DIR is not None, "ROOTDIR is not set in .env file"
-MODEL = "facebook/dinov2-with-registers-small--webp2"
+assert KEYFRAMES_DIR is not None, "KEYFRAMES_DIR is not set in .env file"
+MODEL = "facebook/dinov2-with-registers-small"
 
 features = np.load(f"{PROCESSED_DIR}/features/{MODEL}/features.npy")
 photo_ids = pd.read_csv(f"{PROCESSED_DIR}/features/{MODEL}/photo_ids.csv")["photo_id"]
-
 
 # the photo_id has the format "day3/Allie/[hour]_[seconds].webp"
 # so we need a special sort order
@@ -204,7 +203,7 @@ for video_id in unique_video_ids:
                 minute = tag // 60
                 second = tag % 60
                 tag = f"{minute:02}:{second:02}"
-                path = f"{ROOT_DIR}/{image}"
+                path = f"{KEYFRAMES_DIR}/{image}"
                 html += f"""
                 <div class="image-container">
                     <img src="{path}">
@@ -233,7 +232,7 @@ for video_id in unique_video_ids:
         os.makedirs(video_dir, exist_ok=True)
         for i, segment in enumerate(segments):
             segment_file = os.path.join(video_dir, f"segment_{i}")
-            paths = [f"{ROOT_DIR}/{image}" for image in segment]
+            paths = [f"{KEYFRAMES_DIR}/{image}" for image in segment]
             frames_to_video(paths, segment_file)
 
     all_segments[str(video_id)] = segments

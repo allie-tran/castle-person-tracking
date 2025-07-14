@@ -1,4 +1,3 @@
-from PIL import Image
 import shutil
 import tempfile
 import os
@@ -6,38 +5,24 @@ import cv2
 import requests
 import numpy as np
 import random
-from inputimeout import inputimeout, TimeoutOccurred
 import csv
 import cv2
 import os
-import imagehash
-from .colors import PEOPLE_COLORS
-from .llm import LLM, MixedContent, get_openai_visual_messages
+from utils.colors import PEOPLE_COLORS
 
-placeholder_hash = imagehash.phash(
-    Image.open("/mnt/castle/processed/placeholder.png")
-)  # Load the placeholder image and compute its hash
-
-
-def is_similar_placeholder(frame_rgb, threshold=1):
-    """
-    frame_rgb: RGB frame to compare against the placeholder.
-    If read from cv.imread, it should be converted to RGB:
-
-        frame_rgb = cv.cvtColor(frame, cv.COLOR_BGR2RGB)
-
-    Returns True if the frame is similar to the placeholder image.
-    """
-    frame_hash = imagehash.phash(Image.fromarray(frame_rgb))
-    return frame_hash - placeholder_hash < threshold
-
+def to_sort_key(image):
+    image = image.split(".")[0]
+    rest, time = image.rsplit("/", 1)
+    hour, seconds = time.split("_")
+    hour = int(hour)
+    seconds = int(seconds)
+    return hour * 3600 + seconds
 
 # Dictionary to store colors for unique person IDs for consistent visualization
 unique_person_colors = {
     person: tuple(int(h.strip("#")[i : i + 2], 16) for i in (0, 2, 4))
     for person, h in PEOPLE_COLORS.items()
 }
-
 
 def get_id_color(unique_id):
     if unique_id not in unique_person_colors:
@@ -152,18 +137,8 @@ def create_metadata_file(
     os.makedirs(os.path.join(metadata_dir, "features"), exist_ok=True)
     if os.path.exists(os.path.join(metadata_dir, "metadata.csv")):
         if not overwrite_existing:
-            try:
-                y = inputimeout(
-                    "Metadata file already exists. Do you want to overwrite it? (y/n): ",
-                    timeout=10,
-                ).strip().lower()
-            except TimeoutOccurred:
-                y = "n"  # default to not overwriting if timeout occurs
-
-            if y != "y":
-                print("Exiting without overwriting the metadata file.")
-                return True
-
+            print("Metadata file already exists")
+            return True
         os.remove(os.path.join(metadata_dir, "metadata.csv"))
 
     csv_file = open(os.path.join(metadata_dir, "metadata.csv"), "w", newline="")
@@ -204,32 +179,32 @@ def putText(frame, text, pos, color):
     text_y = pos[1] - int(text_size[1] * TEXT_Y_OFFSET_SCALE)
     cv2.putText(frame, text, (text_x, text_y), font, font_scale, color, thickness)
 
-llm = LLM()
 
 def get_captions_from_frames(cv_frames: list[np.ndarray], instruction: str) -> str:
     image_bytes = []
-    for _, frame in enumerate(cv_frames):
+    temp_dir = tempfile.mkdtemp()
+    for i, frame in enumerate(cv_frames):
         # Convert the frame to RGB format
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        # Convert the RGB frame to bytes
-        _, buffer = cv2.imencode('.jpg', frame_rgb)
+        # Get the buffer of the image
+        _, buffer = cv2.imencode(".jpg", frame_rgb)
         image_bytes.append(buffer.tobytes())
 
-    messages = [
-        MixedContent(
-            type="text",
-            content=instruction
-        )
-    ]
-
-    messages += get_openai_visual_messages(
-        image_paths=image_bytes
+    # restart "ssh AdaptCluster"
+    response = requests.post(
+        "http://localhost:8080/describe",
+        files=[
+            ("images", (f"frame_{i}.jpg", img_bytes, "image/jpeg"))
+            for i, img_bytes in enumerate(image_bytes)
+        ],
+        data={
+            "instruction": instruction,
+        },
     )
-
-    description = llm.generate_from_mixed_media(messages)
-    if not description:
-        return ""
-    assert type(description) is str, "LLM did not return a string"
+    shutil.rmtree(temp_dir)  # Clean up temporary directory
+    if response.status_code != 200:
+        raise Exception(f"Error getting captions: {response.text}")
+    description = response.json().get("description", "")
     return description
 
 
@@ -237,7 +212,6 @@ static_cameras = ["Kitchen", "Living1", "Living2", "Meeting", "Reading"]
 persons = ["Stevan", "Bjorn", "Allie", "Cathal", "Luca", "Florian", "Onanong", "Bao", "Linh", "Tien", "Werner", "Klaus"]
 def get_prompt_for_camera(camera, subtitles):
     if camera in static_cameras:
-        return f"Describe the scene in this room: {camera}. The people are {', '.join(persons)}. Return an empty string if you do not know. Here are some spoken subtitles: {subtitles}"
+        return f"Describe the scene in this room: {camera}. The people are {', '.join(persons)}. Return an empty string if you do not know."
 
-    return f"Assuming the camera wearer is {camera}, describe what they are doing in this scene in maximum 3 sentences. If there are people, use their names if known. Start the sentences with names. [Person A] is doing [action]. [Person B] is doing [action]. The people are {', '.join(persons)}. Return an empty string if you do no know. Here are some spoken subtitles: {subtitles}"
-
+    return f"This is a POV footage from a camera worn by {camera}, being in the same house with {', '.join(persons)}. Describe what they are doing, refer to the people by their names if know. Write the sentences as: <name> is doing <action>."

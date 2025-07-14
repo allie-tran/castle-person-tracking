@@ -1,4 +1,5 @@
 from collections import Counter, defaultdict
+import json
 import cv2
 from ultralytics import YOLO
 import numpy as np
@@ -16,7 +17,6 @@ from people_tracking.utils import (
     get_captions_from_frames,
     get_id_color,
     get_prompt_for_camera,
-    is_similar_placeholder,
     load_raw_tracking_output,
     putText,
     save_raw_tracking_output,
@@ -25,8 +25,11 @@ from people_tracking.people_reid import (
     extract_person_features,
     merge_track_ids,
 )
+from utils.placeholder import is_similar_placeholder
+from utils.email import send_email
 
 # --- CONFIGURATION ---
+FIXED_SIZE = (1280, 720)  # Fixed size for resizing images
 YOLO_MODEL_PATH = "yolo11n-seg.pt"  # or yolov8n-pose.pt
 PERSON_CONF_THRESHOLD = 0.5  # Confidence threshold for person detection
 
@@ -81,7 +84,8 @@ day = args.day
 person = args.person
 key = f"{day}_{person}"
 shot_segment_key = f"{day}/{person}"
-image_path = f"/mnt/castle/castle_downloader/keyframes/{day}/{person}"
+# image_path = f"/mnt/castle/castle_downloader/keyframes/{day}/{person}"
+image_path = f"/mnt/castle/Images/CASTLE/{day}/{person}"
 IMAGE_FOLDER_PATH = image_path
 
 # Ensure the image folder exists
@@ -186,13 +190,7 @@ image_files = sorted(
     ]
 )
 image_paths = [os.path.join(IMAGE_FOLDER_PATH, f) for f in image_files]
-
 out_video_path = os.path.join(OUTPUT_FOLDER_PATH, key, f"processed.mp4")
-first_frame = cv2.imread(image_paths[0]) if image_paths else None
-
-if first_frame is None:
-    print("Error: Could not read the first image.")
-    sys.exit(1)
 
 os.makedirs(OUTPUT_FOLDER_PATH, exist_ok=True)
 os.makedirs(os.path.join(OUTPUT_FOLDER_PATH, key), exist_ok=True)
@@ -203,31 +201,31 @@ metadata_exists = create_metadata_file(
 )
 
 # Load segments
-import json
 
-def webp_name_to_jpg_name(webp_name):
-    """
-    Convert a webp image name to jpg format.
-    """
-    webp_name = webp_name.split(".")[0]
-    day, person, time = webp_name.split("/")
-    hour, seconds = time.split("_")
-    seconds = int(seconds)
-    # 2fps for jpg
-    return [f"{day}/{person}/{hour}_{seconds * 2}.jpg",
-            f"{day}/{person}/{hour}_{seconds * 2 + 1}.jpg"]
+# def webp_name_to_jpg_name(webp_name):
+#     """
+#     Convert a webp image name to jpg format.
+#     """
+#     webp_name = webp_name.split(".")[0]
+#     day, person, time = webp_name.split("/")
+#     hour, seconds = time.split("_")
+#     seconds = int(seconds)
+#     # 2fps for jpg
+#     return [f"{day}/{person}/{hour}_{seconds * 2}.jpg",
+#             f"{day}/{person}/{hour}_{seconds * 2 + 1}.jpg"]
 
 shot_segments = []
 if os.path.exists(SHOT_SEGMENTATION_PATH):
     with open(SHOT_SEGMENTATION_PATH, "r") as f:
         webp_segments = json.load(f).get(shot_segment_key, [])
-        # list of "day1/Allie/20_960.webp"
-        shot_segments = []
-        for segment in webp_segments:
-            jpg_segment = []
-            for image in segment:
-                jpg_segment.extend(webp_name_to_jpg_name(image))
-            shot_segments.append(jpg_segment)
+        shot_segments = webp_segments
+#         # list of "day1/Allie/20_960.webp"
+#         shot_segments = []
+#         for segment in webp_segments:
+#             jpg_segment = []
+#             for image in segment:
+#                 jpg_segment.extend(webp_name_to_jpg_name(image))
+#             shot_segments.append(jpg_segment)
 if not shot_segments:
     rprint(
         f"[red]No shot segments found for {shot_segment_key} in {SHOT_SEGMENTATION_PATH}.[/red]"
@@ -257,176 +255,173 @@ segment_id = 0
 print(
     f"[blue]Processing images from {IMAGE_FOLDER_PATH} with {len(image_paths)} images...[/blue]"
 )
-if not metadata_exists:
-    # Dictionary to accumulate names per YOLO track ID
-    pbar = tqdm(total=len(image_paths), desc="Creating track IDs", unit="image(s)")
-    try:
-        for frame_idx, image_path in enumerate(image_paths):
-
-            # random_num = 1000
-            # if frame_idx < random_num:
-            #     to_skips.add(frame_idx)
-            #     continue
-
-            # if frame_idx > random_num + 500:
-            #     print("Processed 200 frames, stopping early for demonstration.")
-            #     break
-
-            pbar.update(1)
-            frame = cv2.imread(image_path)
-            if frame is None:
-                to_skips.add(frame_idx)
-                print(f"Warning: Could not read image {image_path}. Skipping.")
-                continue
-
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            if is_similar_placeholder(frame_rgb):
-                to_skips.add(frame_idx)
-                pbar.set_description(f"Skipping placeholder-like image")
-                continue
-
-            pbar.set_description(f"Processing {os.path.basename(image_path)}")
-
-            # Get YOLOv8 detections, tracks, AND MASKS
-            # The 'results' object will contain masks if yolov8n-seg.pt is used
-            results = yolo_model.track(
-                frame, persist=True, conf=PERSON_CONF_THRESHOLD, classes=0, verbose=False,
-            )
-
-            # Initialize a blank canvas for drawing all segmentation masks in this frame
-            segmented_frame = np.zeros_like(frame, dtype=np.uint8)
-
-            # Store the predicted probabilities for each face
-            pred_probs = []
-            tracking_output = []
-
-            if results[0].boxes.id is not None:  # type: ignore
-                track_ids = results[0].boxes.id.cpu().numpy()  # type: ignore
-                xyxys = results[0].boxes.xyxy.cpu().numpy()  # type: ignore
-                confs = results[0].boxes.conf.cpu().numpy()  # type: ignore
-                clss = results[0].boxes.cls.cpu().numpy()  # type: ignore
-
-                # Access the raw mask data directly from the results object
-                # results[0].masks.data is a torch.Tensor (N, H_model, W_model)
-                # Convert to numpy once and slice later
-                all_masks_data = results[0].masks.data.cpu().numpy() if results[0].masks is not None else None  # type: ignore
-
-                # Get original frame dimensions for resizing masks
-                original_h, original_w = frame.shape[:2]
-
-                for i, track_id in enumerate(track_ids):
-                    x1, y1, x2, y2 = map(int, xyxys[i])
-                    conf = confs[i]
-                    cls_name = yolo_model.names[int(clss[i])]
-
-                    if cls_name == "person":
-                        x1 = max(0, x1)
-                        y1 = max(0, y1)
-                        x2 = min(frame.shape[1], x2)
-                        y2 = min(frame.shape[0], y2)
-
-                        if y2 <= y1 or x2 <= x1:
-                            continue
-
-                        # apply the mask (if available) to the person crop
-                        person_only = frame.copy()
-                        if all_masks_data is not None and i < len(all_masks_data):
-                            mask_data = all_masks_data[i]
-                            # Resize the mask to the original frame size
-                            mask_resized = cv2.resize(
-                                mask_data,
-                                (original_w, original_h),
-                                interpolation=cv2.INTER_NEAREST,
-                            )
-                            # Expand the mask to make sure the person is fully covered
-                            # by dilating the mask
-                            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-
-                            mask_dilated = cv2.dilate(mask_resized, kernel, iterations=1)
-
-                            current_mask_binary = (
-                                mask_dilated > 0.5
-                            )  # Convert to binary mask
-                            person_only[~current_mask_binary] = (
-                                0  # Set non-mask areas to black
-                            )
-
-                        person_crop = person_only[y1:y2, x1:x2]
-                        person_feat = extract_person_features([person_crop])
-                        face_data_in_crop = get_face_data_from_person_crop(person_crop)
-                        potential_id = None
-                        face_bboxes = []
-                        prob = [0.0 for _ in range(len(svm_classifier.classes_))]
-
-                        for face_info in face_data_in_crop:
-                            face_emb = face_info["embedding"]
-                            potential_id, prob = find_or_create_unique_person(face_emb)
-                            face_bboxes = face_info["bbox"]
-                            break  # Only take the first detected face
-
-                        pred_probs.append(prob)
-                        tracking_output.append((
-                            metadata_dir,
-                            frame_idx,
-                            track_id,
-                            (x1, y1, x2, y2),
-                            person_feat,
-                            face_bboxes,
-                            potential_id,
-                            all_masks_data[i] if all_masks_data is not None else None,
-                        ))
-
-            # Process the tracking output
-            if len(pred_probs) > 0:
-                face_assignments = assign_faces_per_frame(
-                    pred_probs,
-                    svm_classifier.classes_,
-                )
-
-                # Save the tracking output
-                for i, data in enumerate(tracking_output):
-                    face_id = face_assignments.get(i, data[6])
-                    data = data[:6] + (face_id,) + data[7:]
-
-                    save_raw_tracking_output(*data)
-                    track_id = data[2]
-
-                    # Store the detected person information
-                    track_id_to_names[track_id].append(face_id)
-                    track_id_to_frames[track_id].append(frame_idx)
-
-    except KeyboardInterrupt:
-        print("Processing interrupted by user.")
-        rprint("[orange]Continuing to save current progress...[/orange]")
-
-    pbar.close()
-
-    # Save to_skips
-    with open(to_skips_path, "w") as f:
-        for idx in sorted(to_skips):
-            f.write(f"{idx}\n")
-
 # --- Load the tracking data ---
 tracking_data = load_raw_tracking_output(metadata_dir)
+done = set()
 rprint(f"[green]Loaded {len(tracking_data)} tracking data rows.[/green]")
 
-if metadata_exists:
-    for row in tracking_data:
-        track_id = row["track_id"]
-        potential_id = row["potential_id"]
-        track_id_to_names[track_id].append(potential_id)
-        track_id_to_frames[track_id].append(row["frame_id"])
+for row in tracking_data:
+    track_id = row["track_id"]
+    potential_id = row["potential_id"]
+    track_id_to_names[track_id].append(potential_id)
+    track_id_to_frames[track_id].append(row["frame_id"])
+    done.add(row["frame_id"])
 
-    if os.path.exists(to_skips_path):
-        with open(to_skips_path, "r") as f:
-            to_skips = {int(line.strip()) for line in f if line.strip().isdigit()}
+if os.path.exists(to_skips_path):
+    with open(to_skips_path, "r") as f:
+        to_skips = {int(line.strip()) for line in f if line.strip().isdigit()}
 
-    rprint(
-        f"[blue]Loaded {len(to_skips)} skipped frames from {to_skips_path}.[/blue]"
-    )
-# --- Print the track IDs and their names ---
-    rprint("[blue]Track IDs and their names:[/blue]")
+rprint(
+    f"[blue]Loaded {len(to_skips)} skipped frames from {to_skips_path}.[/blue]"
+)
 
+def skip_frame(frame_idx):
+    to_skips.add(frame_idx)
+    with open(to_skips_path, "a") as f:
+        f.write(f"{frame_idx}\n")
+
+# --- Processing images and creating track IDs ---
+pbar = tqdm(total=len(image_paths), desc="Creating track IDs", unit="image(s)")
+try:
+    for frame_idx, image_path in enumerate(image_paths):
+        pbar.update(1)
+        if frame_idx in to_skips or frame_idx in done:
+            pbar.set_description(f"Skipping frame {frame_idx} (already processed)")
+            continue
+
+        frame = cv2.imread(image_path)
+        if frame is None:
+            skip_frame(frame_idx)
+            print(f"Warning: Could not read image {image_path}. Skipping.")
+            continue
+
+        frame = cv2.resize(frame, FIXED_SIZE, interpolation=cv2.INTER_LINEAR)
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        if is_similar_placeholder(frame_rgb):
+            skip_frame(frame_idx)
+            pbar.set_description(f"Skipping placeholder-like image")
+            continue
+
+        pbar.set_description(f"Processing {os.path.basename(image_path)}")
+
+        # Get YOLOv8 detections, tracks, AND MASKS
+        # The 'results' object will contain masks if yolov8n-seg.pt is used
+        results = yolo_model.track(
+            frame, persist=True, conf=PERSON_CONF_THRESHOLD, classes=0, verbose=False,
+        )
+
+        # Initialize a blank canvas for drawing all segmentation masks in this frame
+        segmented_frame = np.zeros_like(frame, dtype=np.uint8)
+
+        # Store the predicted probabilities for each face
+        pred_probs = []
+        tracking_output = []
+
+        if results[0].boxes.id is not None:  # type: ignore
+            track_ids = results[0].boxes.id.cpu().numpy()  # type: ignore
+            xyxys = results[0].boxes.xyxy.cpu().numpy()  # type: ignore
+            confs = results[0].boxes.conf.cpu().numpy()  # type: ignore
+            clss = results[0].boxes.cls.cpu().numpy()  # type: ignore
+
+            # Access the raw mask data directly from the results object
+            # results[0].masks.data is a torch.Tensor (N, H_model, W_model)
+            # Convert to numpy once and slice later
+            all_masks_data = results[0].masks.data.cpu().numpy() if results[0].masks is not None else None  # type: ignore
+
+            # Get original frame dimensions for resizing masks
+            original_h, original_w = frame.shape[:2]
+
+            for i, track_id in enumerate(track_ids):
+                x1, y1, x2, y2 = map(int, xyxys[i])
+                conf = confs[i]
+                cls_name = yolo_model.names[int(clss[i])]
+
+                if cls_name == "person":
+                    x1 = max(0, x1)
+                    y1 = max(0, y1)
+                    x2 = min(frame.shape[1], x2)
+                    y2 = min(frame.shape[0], y2)
+
+                    if y2 <= y1 or x2 <= x1:
+                        continue
+
+                    # apply the mask (if available) to the person crop
+                    person_only = frame.copy()
+                    if all_masks_data is not None and i < len(all_masks_data):
+                        mask_data = all_masks_data[i]
+                        # Resize the mask to the original frame size
+                        mask_resized = cv2.resize(
+                            mask_data,
+                            (original_w, original_h),
+                            interpolation=cv2.INTER_NEAREST,
+                        )
+                        # Expand the mask to make sure the person is fully covered
+                        # by dilating the mask
+                        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+
+                        mask_dilated = cv2.dilate(mask_resized, kernel, iterations=1)
+
+                        current_mask_binary = (
+                            mask_dilated > 0.5
+                        )  # Convert to binary mask
+                        person_only[~current_mask_binary] = (
+                            0  # Set non-mask areas to black
+                        )
+
+                    person_crop = person_only[y1:y2, x1:x2]
+                    person_feat = extract_person_features([person_crop])
+                    face_data_in_crop = get_face_data_from_person_crop(person_crop)
+                    potential_id = None
+                    face_bboxes = []
+                    prob = [0.0 for _ in range(len(svm_classifier.classes_))]
+
+                    for face_info in face_data_in_crop:
+                        face_emb = face_info["embedding"]
+                        potential_id, prob = find_or_create_unique_person(face_emb)
+                        face_bboxes = face_info["bbox"]
+                        break  # Only take the first detected face
+
+                    pred_probs.append(prob)
+                    tracking_output.append((
+                        metadata_dir,
+                        frame_idx,
+                        track_id,
+                        (x1, y1, x2, y2),
+                        person_feat,
+                        face_bboxes,
+                        potential_id,
+                        all_masks_data[i] if all_masks_data is not None else None,
+                    ))
+
+        # Process the tracking output
+        if len(pred_probs) > 0:
+            face_assignments = assign_faces_per_frame(
+                pred_probs,
+                svm_classifier.classes_,
+            )
+
+            # Save the tracking output
+            for i, data in enumerate(tracking_output):
+                face_id = face_assignments.get(i, data[6])
+                data = data[:6] + (face_id,) + data[7:]
+
+                save_raw_tracking_output(*data)
+                track_id = data[2]
+
+                # Store the detected person information
+                track_id_to_names[track_id].append(face_id)
+                track_id_to_frames[track_id].append(frame_idx)
+        else:
+            skip_frame(frame_idx)
+            continue
+
+except KeyboardInterrupt:
+    print("Processing interrupted by user.")
+    rprint("[orange]Continuing to save current progress...[/orange]")
+
+pbar.close()
+
+load_raw_tracking_output(metadata_dir)
 # --- Group track IDs based on the embeddings and temporal proximity
 rprint(
     "[blue]Grouping track IDs based on person embeddings and temporal proximity...[/blue]"
@@ -472,6 +467,7 @@ print(
 
 # Create name for clusters
 cluster_to_names = defaultdict(str)
+track_id_to_cluster = {}
 for cluster_id, track_ids in clustered_track_ids.items():
     if not track_ids:
         continue
@@ -487,23 +483,55 @@ for cluster_id, track_ids in clustered_track_ids.items():
         most_common_name, _ = Counter(all_names).most_common(1)[0]
         cluster_to_names[cluster_id] = most_common_name
 
+    track_id_to_cluster.update(
+        {track_id: cluster_id for track_id in track_ids}
+    )
+
+
+# --- CREATE FINAL METADATA ---
+# so that we have a mapping of frame_idx to:
+# - a list of track_ids
+# - each track_id has 1 name, 1 bbox, and 1 face_bbox
+final_metadata_path = os.path.join(OUTPUT_FOLDER_PATH, key, "final_metadata.json")
+final_metadata = [{
+        "image_path": image_path,
+        "track_ids": [],
+    } for image_path in image_paths
+                  ]
+
+for row in tracking_data:
+    frame_id = row["frame_id"]
+    track_id = row["track_id"]
+    name = cluster_to_names.get(
+        track_id_to_cluster.get(track_id, None), "Unknown"
+    )
+    # Ensure the frame_id is within bounds
+    if frame_id < len(final_metadata):
+        final_metadata[frame_id]["track_ids"].append({
+            "name": name,
+            **row
+        })
+
+# Save the final metadata to a JSON file
+import json
+with open(final_metadata_path, "w") as f:
+    json.dump(final_metadata, f, indent=4)
 
 # --- VISUALIZATION SETUP ---
 rprint("[blue]Setting up visualization...[/blue]")
-
 # --- NEW: Iterate through the CSV rows and frames at the same time and visualize ---
 fps = 8
 overlay_video = cv2.VideoWriter(
     out_video_path,
     cv2.VideoWriter_fourcc(*"mp4v"),  # type: ignore
     fps,  # Frame rate
-    (first_frame.shape[1], first_frame.shape[0]),
+    FIXED_SIZE,  # Frame size
 )
 mask_video = cv2.VideoWriter(
     os.path.join(OUTPUT_FOLDER_PATH, key, "masks.mp4"),
     cv2.VideoWriter_fourcc(*"mp4v"),  # type: ignore
     fps,  # Frame rate
-    (first_frame.shape[1], first_frame.shape[0]),
+    FIXED_SIZE,  # Frame size
 )
 
 rprint(f"[blue]Output video will be saved to {out_video_path}[/blue]")
@@ -511,118 +539,89 @@ current_segment_id = 0
 current_frames: list[str] = []  # List to store frames for the current segment
 current_overlays: list[np.ndarray] = []
 descriptions = []
+
+def to_key(frame_idx) -> str:
+    """
+    Convert a frame index to a key for the image paths.
+    """
+    key = image_paths[frame_idx].split("/")[-3:]
+    key = "/".join(key)
+    return key
+
+
 try:
-    current_frame_idx = 0
-    frame = cv2.imread(image_paths[current_frame_idx])
-    segmented_frame = np.zeros_like(frame, dtype=np.uint8)
-    alpha = 0.5  # Transparency factor for overlay
-
-    pbr = tqdm(
-        total=len(tracking_data),
-        desc="Processing frames",
-        unit="frame(s)",
-    )
-    for row in tracking_data:
-        pbr.update(1)
-        frame_id = row["frame_id"]
-
-        done = False
-        while current_frame_idx < frame_id:
-            if current_frame_idx in to_skips:
-                current_frame_idx += 1
+    for segment_id, segment in enumerate(shot_segments):
+        pbar.set_description(
+            f"Processing segment {segment_id + 1}/{len(shot_segments)}"
+        )
+        current_frames = []
+        current_overlays = []  # Reset current overlays for the new segment
+        for image_name in segment:
+            current_frame_idx = image_paths.index(
+                os.path.join(IMAGE_FOLDER_PATH, image_name.split("/")[-1])
+            )
+            # Reset the frame and segmented_frame for the new segment
+            frame = cv2.imread(image_paths[current_frame_idx])
+            if frame is None:
+                rprint(f"[red]Could not read image {image_paths[current_frame_idx]}.[/red]")
                 continue
+            frame = cv2.resize(frame, FIXED_SIZE, interpolation=cv2.INTER_LINEAR)
+            segmented_frame = np.zeros_like(frame, dtype=np.uint8)
+            alpha = 0.5  # Transparency factor for overlay
+            for track in final_metadata[current_frame_idx]["track_ids"]:
+                track_id = track["track_id"]
+                person_bbox = track["bbox"]
+                face_bbox = track["face_bbox"]
+                display_name = cluster_to_names.get(
+                    track_id_to_cluster.get(track_id, None), "Unknown"
+                )
+                color = get_id_color(display_name)
 
-            current_frame_idx += 1
-            # save the current frame with the previous row's data
-            # add mask to the frame (overlay)
+                # Draw the bounding boxes
+                x1, y1, x2, y2 = person_bbox
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                fx1, fy1, fx2, fy2 = face_bbox
+                if (fx1, fy1, fx2, fy2) != (0, 0, 0, 0):
+                    # Draw the face bounding box
+                    abs_fx1 = x1 + fx1
+                    abs_fy1 = y1 + fy1
+                    abs_fx2 = x1 + fx2
+                    abs_fy2 = y1 + fy2
+                    cv2.rectangle(
+                        frame, (abs_fx1, abs_fy1), (abs_fx2, abs_fy2), (0, 255, 255), 2
+                    )
+                # Draw the name just below the bounding box (top-left corner)
+                putText(
+                    frame,
+                    f"{display_name} ({track_id})",
+                    (x1, y2),
+                    (0, 255, 0),  # Green text
+                )
+            # Add the current frame to the overlay
             overlay = cv2.addWeighted(frame, 1, segmented_frame, alpha, 0)
             # Write the final frame to the output video
             overlay_video.write(overlay)
             mask_video.write(segmented_frame)
             current_overlays.append(overlay)
-            current_frames.append(image_paths[current_frame_idx - 1])
+            current_frames.append(image_paths[current_frame_idx])
 
-            if current_frame_idx < len(image_paths):
-                frame = cv2.imread(image_paths[current_frame_idx])
-                segmented_frame = np.zeros_like(frame, dtype=np.uint8)
-                # Check if we have move to the next segment
-                img_key = image_paths[current_frame_idx].split("/")[-3:]
-                img_key = "/".join(img_key)
-                segment_id = frame_to_segment.get(img_key, current_segment_id)
-                if segment_id != current_segment_id:
-                    pbr.set_description(
-                        f"Getting description for segment {segment_id} ({len(current_frames)} frames)"
-                    )
-                    description = get_captions_from_frames(
-                        current_overlays, get_prompt_for_camera(person, gather_subtitles(current_frames, subtitles))
-                    )
-                    descriptions.append((segment_id, shot_segments[segment_id][0], description))
-                    print(
-                        f"Segment {segment_id} description: {description}"
-                    )
-                    # New segment, increment segment_id
-                    current_segment_id = segment_id
-                    current_frames = []  # Reset current frames for the new segment
-                    current_overlays = []  # Reset current overlays for the new segment
-            else:
-                print("No more frames to process.")
-                done = True
-                break
-        if done:
-            break
-
-
-        track_id = row["track_id"]
-        person_bbox = row["bbox"]
-        mask_path = row["mask_path"]
-        face_bbox = row["face_bbox"]
-        current_mask_binary_resized = None
-        cluster_id = next(
-            (cid for cid, tids in clustered_track_ids.items() if track_id in tids),
-            None,
+        # Check if we have any frames to process
+        if not current_frames:
+            rprint(f"[red]No frames found for segment {segment_id}. Skipping...[/red]")
+            continue
+        # Get the description for the current segment
+        pbar.set_description(
+            f"Getting description for segment {segment_id + 1} ({len(current_frames)} frames)"
         )
-        display_name = (
-            cluster_to_names[cluster_id]
-            if cluster_id is not None and cluster_id in cluster_to_names
-            else "Unknown"
+        description = get_captions_from_frames(
+            current_overlays,
+            get_prompt_for_camera(person, gather_subtitles(current_frames, subtitles)),
         )
-        color = get_id_color(display_name)
-
-        # Get segmentation mask if available
-        if mask_path:
-            mask_image = cv2.imread(
-                os.path.join(metadata_dir, mask_path), cv2.IMREAD_GRAYSCALE
-            )
-            if mask_image is not None:
-                mask_image = cv2.resize(
-                    mask_image,
-                    (frame.shape[1], frame.shape[0]),
-                    interpolation=cv2.INTER_NEAREST,
-                )
-                current_mask_binary_resized = mask_image > 0.5  # Convert to binary mask
-                segmented_frame[current_mask_binary_resized] = np.array(color)
-
-        # Draw the bounding boxes
-        x1, y1, x2, y2 = person_bbox
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)  # Green box
-        fx1, fy1, fx2, fy2 = face_bbox
-        if (fx1, fy1, fx2, fy2) != (0, 0, 0, 0):
-            # Draw the face bounding box
-            abs_fx1 = x1 + fx1
-            abs_fy1 = y1 + fy1
-            abs_fx2 = x1 + fx2
-            abs_fy2 = y1 + fy2
-            cv2.rectangle(
-                frame, (abs_fx1, abs_fy1), (abs_fx2, abs_fy2), (0, 255, 255), 2
-            )
-
-        # Draw the name just below the bounding box (top-left corner)
-        putText(
-            frame,
-            f"{display_name} ({track_id}, {cluster_id})",
-            (x1, y2),
-            (0, 255, 0),  # Green text
+        descriptions.append((segment_id, shot_segments[segment_id][0], description))
+        rprint(
+            f"[green]Segment {segment_id} description: {description}[/green]"
         )
+
 
 except KeyboardInterrupt:
     print("Processing interrupted by user.")
@@ -632,13 +631,6 @@ overlay_video.release()
 mask_video.release()
 cv2.destroyAllWindows()
 
-# Write the final segment description
-if current_overlays:
-    description = get_captions_from_frames(
-        current_overlays, get_prompt_for_camera(person, gather_subtitles(current_frames, person)
-    ))
-    descriptions.append((segment_id, shot_segments[segment_id][0], description))
-# Save the segment descriptions in a csv file
 import csv
 descriptions_path = os.path.join(OUTPUT_FOLDER_PATH, key, "descriptions.csv")
 with open(descriptions_path, "w", newline="") as csvfile:
@@ -646,3 +638,8 @@ with open(descriptions_path, "w", newline="") as csvfile:
     csv_writer.writerow(["segment_id", "segment_name", "description"])
     for segment_id, segment_name, description in descriptions:
         csv_writer.writerow([segment_id, segment_name, description])
+
+send_email(
+    subject=f"Person Tracking Completed for {day} - {person}",
+    body=f"Tracking completed for {day} - {person}. Metadata saved to {final_metadata_path}.",
+)

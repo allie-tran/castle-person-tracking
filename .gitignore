@@ -208,3 +208,4 @@ __marimo__/
 person_tracking_output/
 groundtruth
 yolo11n-seg.pt
+tracking_output_jpg/
