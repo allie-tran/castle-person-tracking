@@ -624,9 +624,11 @@ try:
 
 
 except KeyboardInterrupt:
-    print("Processing interrupted by user.")
-    rprint("[red]Exiting...[/red]")
+    print("[orange]Processing interrupted by user.[/orange]")
+except Exception as e:
+    rprint("[red]An error occurred during processing:[/red]", e)
 
+rprint("[blue]Saving current progress...[/blue]")
 overlay_video.release()
 mask_video.release()
 cv2.destroyAllWindows()
