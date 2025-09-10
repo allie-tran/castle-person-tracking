@@ -3,7 +3,7 @@
 # platform: linux-64
 @EXPLICIT
 https://repo.anaconda.com/pkgs/main/linux-64/_libgcc_mutex-0.1-main.conda
-https://repo.anaconda.com/pkgs/main/linux-64/ca-certificates-2025.2.25-h06a4308_0.conda
+https://repo.anaconda.com/pkgs/main/linux-64/ca-certificates-2025.7.15-h06a4308_0.conda
 https://repo.anaconda.com/pkgs/main/linux-64/ld_impl_linux-64-2.40-h12ee557_0.conda
 https://repo.anaconda.com/pkgs/main/linux-64/libstdcxx-ng-11.2.0-h1234567_1.conda
 https://repo.anaconda.com/pkgs/main/linux-64/libgomp-11.2.0-h1234567_1.conda
@@ -15,7 +15,7 @@ https://repo.anaconda.com/pkgs/main/linux-64/libffi-3.4.4-h6a678d5_1.conda
 https://repo.anaconda.com/pkgs/main/linux-64/libsodium-1.0.18-h7b6447c_0.conda
 https://repo.anaconda.com/pkgs/main/linux-64/libuuid-1.41.5-h5eee18b_0.conda
 https://repo.anaconda.com/pkgs/main/linux-64/ncurses-6.4-h6a678d5_0.conda
-https://repo.anaconda.com/pkgs/main/linux-64/openssl-3.0.16-h5eee18b_0.conda
+https://repo.anaconda.com/pkgs/main/linux-64/openssl-3.0.17-h5eee18b_0.conda
 https://repo.anaconda.com/pkgs/main/linux-64/pthread-stubs-0.3-h0ce48e5_1.conda
 https://repo.anaconda.com/pkgs/main/linux-64/xorg-libxau-1.0.12-h9b100fa_0.conda
 https://repo.anaconda.com/pkgs/main/linux-64/xorg-libxdmcp-1.1.5-h9b100fa_0.conda
@@ -29,6 +29,7 @@ https://repo.anaconda.com/pkgs/main/linux-64/sqlite-3.45.3-h5eee18b_0.conda
 https://repo.anaconda.com/pkgs/main/linux-64/xorg-libx11-1.8.12-h9b100fa_1.conda
 https://repo.anaconda.com/pkgs/main/linux-64/tk-8.6.14-h993c535_1.conda
 https://repo.anaconda.com/pkgs/main/linux-64/asttokens-3.0.0-py310h06a4308_0.conda
+https://repo.anaconda.com/pkgs/main/linux-64/certifi-2025.8.3-py310h06a4308_0.conda
 https://repo.anaconda.com/pkgs/main/linux-64/debugpy-1.8.11-py310h6a678d5_0.conda
 https://repo.anaconda.com/pkgs/main/linux-64/exceptiongroup-1.2.0-py310h06a4308_0.conda
 https://repo.anaconda.com/pkgs/main/linux-64/nest-asyncio-1.6.0-py310h06a4308_0.conda
@@ -43,7 +44,6 @@ https://repo.anaconda.com/pkgs/main/linux-64/python-3.10.18-h1a3bd86_0.conda
 # no URL for: blinker-1.9.0.dist-info
 # no URL for: braceexpand-0.1.7.dist-info
 # no URL for: cachetools-5.5.2.dist-info
-# no URL for: certifi-2025.6.15.dist-info
 # no URL for: cfgv-3.4.0.dist-info
 # no URL for: charset_normalizer-3.4.2.dist-info
 # no URL for: click-8.2.1.dist-info
@@ -188,7 +188,7 @@ https://repo.anaconda.com/pkgs/main/linux-64/matplotlib-inline-0.1.6-py310h06a43
 # no URL for: opencv_python_headless-4.5.5.64.dist-info
 # no URL for: optree-0.16.0.dist-info
 https://repo.anaconda.com/pkgs/main/linux-64/pexpect-4.9.0-py310h06a4308_0.conda
-https://repo.anaconda.com/pkgs/main/noarch/pip-25.1-pyhc872135_2.conda
+https://repo.anaconda.com/pkgs/main/noarch/pip-25.2-pyhc872135_0.conda
 # no URL for: plotly-6.1.2.dist-info
 # no URL for: preshed-3.0.10.dist-info
 https://repo.anaconda.com/pkgs/main/linux-64/prompt-toolkit-3.0.43-py310h06a4308_0.conda
