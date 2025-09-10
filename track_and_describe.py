@@ -68,24 +68,46 @@ parser.add_argument(
 parser.add_argument(
     "--output_folder",
     type=str,
-    default="person_tracking_output",
+    default="tracking_output",
     help="Path to the output folder for processed images and metadata",
+)
+parser.add_argument(
+    "--input_folder",
+    type=str,
+    required=True,
+    help="Path to the input folder containing images, with subfolders for each day, e.g., /path/to/images/<day>/<person>/"
+)
+parser.add_argument(
+    "--fps",
+    type=int,
+    default=5,
+    help="Frame rate in the input images (default: 5), to be used for video creation and subtitle alignment",
 )
 parser.add_argument(
     "--overwrite",
     action="store_true",
     help="Overwrite existing metadata files",
 )
+parser.add_argument(
+    "--no_video",
+    action="store_true",
+    help="Do not create output video",
+)
+parser.add_argument(
+    "--no_descriptions",
+    action="store_true",
+    help="Do not generate descriptions",
+)
+
 args = parser.parse_args()
 OUTPUT_FOLDER_PATH = args.output_folder
 day = args.day
 person = args.person
 key = f"{day}_{person}"
 shot_segment_key = f"{day}/{person}"
-# image_path = f"/mnt/castle/castle_downloader/keyframes/{day}/{person}"
-image_path = f"lone_5fps/{day}/{person}"
+image_path = f"{args.input_folder}/{day}/{person}"
 IMAGE_FOLDER_PATH = image_path
-FPS = 5
+FPS = args.fps
 
 # Ensure the image folder exists
 if not os.path.exists(IMAGE_FOLDER_PATH):
@@ -479,11 +501,11 @@ with open(final_metadata_path, "w") as f:
 # --- VISUALIZATION SETUP ---
 rprint("[blue]Creating outputs...[/blue]")
 # --- NEW: Iterate through the CSV rows and frames at the same time and visualize ---
-OUTPUT_VIDEO = True
+OUTPUT_VIDEO = not args.no_video
 overlay_video = None
 mask_video = None
 if OUTPUT_VIDEO:
-    fps = 8
+    fps = FPS  # Assuming a frame rate of 5 FPS
     overlay_video = cv2.VideoWriter(
         out_video_path,
         cv2.VideoWriter_fourcc(*"mp4v"),  # type: ignore
@@ -609,20 +631,21 @@ try:
             f"Getting description for segment {segment_id + 1} ({len(current_frames)} frames)"
         )
 
-        # description = get_captions_from_frames(
-        #     current_overlays,
-        #     get_prompt_for_camera(
-        #         person, gather_subtitles(current_frames, subtitles, fps=FPS)
-        #     ),
-        # )
-        # descriptions.append(
-        #     {
-        #         "start": image_start,
-        #         "end": image_end,
-        #         "description": description,
-        #     }
-        # )
-        # rprint(f"[blue]{image_start} to {image_end}: {description}[/blue]")
+        if not args.no_descriptions:
+            description = get_captions_from_frames(
+                current_overlays,
+                get_prompt_for_camera(
+                    person, gather_subtitles(current_frames, subtitles, fps=FPS)
+                ),
+            )
+            descriptions.append(
+                {
+                    "start": image_start,
+                    "end": image_end,
+                    "description": description,
+                }
+            )
+            rprint(f"[blue]{image_start} to {image_end}: {description}[/blue]")
 
 except KeyboardInterrupt:
     print("[orange]Processing interrupted by user.[/orange]")
@@ -639,8 +662,9 @@ if OUTPUT_VIDEO:
 cv2.destroyAllWindows()
 
 # --- Save the descriptions to a JSON file ---
-with open(descriptions_path, "w") as f:
-    json.dump(descriptions, f, indent=4)
+if not args.no_descriptions:
+    with open(descriptions_path, "w") as f:
+        json.dump(descriptions, f, indent=4)
 
 # send_email(
 #     subject=f"Person Tracking Completed for {day} - {person}",
