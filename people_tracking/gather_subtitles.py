@@ -43,18 +43,33 @@ def get_subtitles_for_day(day: str, person: str):
                 )
     return subtitles
 
+def format_timestamp(timestamp: int) -> str:
+    """
+    Format timestamp in seconds to HH:MM:SS
+    :param timestamp: timestamp in seconds
+    :return: formatted timestamp
+    """
+    hours = timestamp // 3600
+    minutes = (timestamp % 3600) // 60
+    seconds = timestamp % 60
+    return f"{hours:02}:{minutes:02}:{seconds:02}"
 
-def gather_subtitles(segment: list[str], subtitles: list[dict]):
+def gather_subtitles(segment: list[str], subtitles: list[dict], fps=2) -> str:
     """
     Gather subtitles from a given segment
     :param segment: list of image_key (day/name/hour_frameid)
     """
-    start = get_timestamp_from_image_key(segment[0])
-    end = get_timestamp_from_image_key(segment[-1])
+    start = get_timestamp_from_image_key(segment[0], fps)
+    end = get_timestamp_from_image_key(segment[-1], fps)
 
     chunks = []
     for subtitle in subtitles:
-        if subtitle["start"] >= start and subtitle["end"] <= end:
-            chunks.append(subtitle["text"])
+        if subtitle["start"] <= end and subtitle["end"] >= start:
+            start_time = format_timestamp(subtitle["start"])
+            end_time = format_timestamp(subtitle["end"])
+            chunks.append(f"[{start_time} - {end_time}]: {subtitle['text']}")
+
+    if not chunks:
+        return ""
 
     return "\n".join(chunks)

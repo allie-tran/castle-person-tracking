@@ -1,14 +1,16 @@
-import shutil
-import tempfile
-import os
-import cv2
-import requests
-import numpy as np
-import random
 import csv
-import cv2
+import time
 import os
+import random
+
+import cv2
+import numpy as np
+import requests
+from rich import print
+from .llm import LLM, MixedContent, get_visual_content
+
 from utils.colors import PEOPLE_COLORS
+
 
 def to_sort_key(image):
     image = image.split(".")[0]
@@ -16,13 +18,29 @@ def to_sort_key(image):
     hour, seconds = time.split("_")
     hour = int(hour)
     seconds = int(seconds)
-    return hour * 3600 + seconds
+    return f"{rest}/{hour * 3600 + seconds:06d}"
+
+def retry_with_wait(func, retries=3, wait_time=1, *args, **kwargs):
+    """
+    Retry a function with a specified number of retries and wait time between attempts.
+    """
+    for attempt in range(retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            print(f"Attempt {attempt + 1} failed: {e}")
+            if attempt < retries - 1:
+                print(f"Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
+    raise RuntimeError(f"Function {func.__name__} failed after {retries} attempts.")
+
 
 # Dictionary to store colors for unique person IDs for consistent visualization
 unique_person_colors = {
     person: tuple(int(h.strip("#")[i : i + 2], 16) for i in (0, 2, 4))
     for person, h in PEOPLE_COLORS.items()
 }
+
 
 def get_id_color(unique_id):
     if unique_id not in unique_person_colors:
@@ -36,8 +54,7 @@ def get_id_color(unique_id):
 
 
 def save_raw_tracking_output(
-    metadata_dir, frame_id, track_id, bbox, person_feat,
-    face_bbox, potential_id, mask
+    metadata_dir, frame_id, track_id, bbox, person_feat, face_bbox, potential_id, mask
 ):
     """
     save_dir: directory to save tracking output images.
@@ -162,9 +179,11 @@ def create_metadata_file(
     )
     return False
 
+
 FONT_SCALE = 6e-4  # Adjust for larger font size in all images
 THICKNESS_SCALE = 2e-3  # Adjust for larger thickness in all images
 TEXT_Y_OFFSET_SCALE = 1e-3  # Adjust for larger Y-offset of text and bounding box
+
 
 def putText(frame, text, pos, color):
     """
@@ -180,38 +199,111 @@ def putText(frame, text, pos, color):
     cv2.putText(frame, text, (text_x, text_y), font, font_scale, color, thickness)
 
 
-def get_captions_from_frames(cv_frames: list[np.ndarray], instruction: str) -> str:
+MAX_FRAMES = 1000
+llm_model = LLM()
+
+
+def get_captions_from_frames(
+    cv_frames: list[np.ndarray], instructions: list[str]
+) -> str:
+    if len(cv_frames) == 0:
+        return ""
+
+    if len(cv_frames) > MAX_FRAMES:
+        # sample frames
+        indices = sorted(random.sample(range(len(cv_frames)), MAX_FRAMES))
+        cv_frames = [cv_frames[i] for i in indices]
+
     image_bytes = []
-    temp_dir = tempfile.mkdtemp()
-    for i, frame in enumerate(cv_frames):
+    for frame in cv_frames:
         # Convert the frame to RGB format
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # frame_rgb = cv2.resize(
+        #     frame_rgb, (512, 512), interpolation=cv2.INTER_AREA
+        # )
         # Get the buffer of the image
         _, buffer = cv2.imencode(".jpg", frame_rgb)
         image_bytes.append(buffer.tobytes())
 
-    # restart "ssh AdaptCluster"
-    response = requests.post(
-        "http://localhost:8080/describe",
-        files=[
-            ("images", (f"frame_{i}.jpg", img_bytes, "image/jpeg"))
-            for i, img_bytes in enumerate(image_bytes)
-        ],
-        data={
-            "instruction": instruction,
-        },
-    )
-    shutil.rmtree(temp_dir)  # Clean up temporary directory
-    if response.status_code != 200:
-        raise Exception(f"Error getting captions: {response.text}")
-    description = response.json().get("description", "")
-    return description
 
+    description: str = retry_with_wait(
+        get_description_from_frames,
+        instructions=instructions,
+        image_bytes=image_bytes,
+        retries=3,
+        wait_time=30,
+    )
+
+    # Rewrite description based on the transcript
+    rewritten_response: str = retry_with_wait(
+        get_rewritten_description,
+        description=description,
+        instructions=instructions,
+        retries=3,
+        wait_time=30,
+    )
+    return rewritten_response if rewritten_response else description.strip()
+
+USE_TARSIER = False
+def get_description_from_frames(instructions: list[str], image_bytes: list[bytes]) -> str:
+    if USE_TARSIER:
+        # Get description first
+        response = requests.post(
+            "http://localhost:8080/describe",
+            files=[
+                ("images", (f"frame_{i}.jpg", img_bytes, "image/jpeg"))
+                for i, img_bytes in enumerate(image_bytes)
+            ],
+            data={"instruction": instructions[0]},
+        )
+        if response.status_code != 200:
+            print(f"[red]Error getting description:[/red] {response.text}")
+        description = response.json().get("description", "")
+    else:
+        description = llm_model.generate_from_mixed_media(
+            get_visual_content(image_bytes) + [MixedContent(type="text", content=instructions[0])],
+        )
+    return str(description).strip()
+
+def get_rewritten_description(description, instructions: list[str] = []):
+    if len(instructions) >= 2 and instructions[1]:
+        prompt = f"Rewrite these sentences:\n{description}.\n\n{instructions[1]}"
+        rewritten_response: str = llm_model.generate_from_text(prompt)  # type: ignore
+        return rewritten_response.strip()
+    else:
+        # If no instructions are provided, just return the description
+        return description
 
 static_cameras = ["Kitchen", "Living1", "Living2", "Meeting", "Reading"]
-persons = ["Stevan", "Bjorn", "Allie", "Cathal", "Luca", "Florian", "Onanong", "Bao", "Linh", "Tien", "Werner", "Klaus"]
-def get_prompt_for_camera(camera, subtitles):
-    if camera in static_cameras:
-        return f"Describe the scene in this room: {camera}. The people are {', '.join(persons)}. Return an empty string if you do not know."
+persons = [
+    "Stevan",
+    "Bjorn",
+    "Allie",
+    "Cathal",
+    "Luca",
+    "Florian",
+    "Onanong",
+    "Bao",
+    "Linh",
+    "Tien",
+    "Werner",
+    "Klaus",
+]
 
-    return f"This is a POV footage from a camera worn by {camera}, being in the same house with {', '.join(persons)}. Describe what they are doing, refer to the people by their names if know. Write the sentences as: <name> is doing <action>."
+
+def get_prompt_for_camera(camera: str, subtitles: str) -> list[str]:
+    instruction: list[str] = []
+    if camera in static_cameras:
+        instruction.append(
+            f"Describe the scene in this room: {camera}. The people are {', '.join(persons)}. Return an empty string if you do not know.",
+        )
+    else:
+        instruction.append(
+            f"This is a POV footage from a camera worn by {camera}, being in the same house with {', '.join(persons)}. Describe what they are doing, refer to the people by their names if know. Write the sentences as: <name> is doing <action>."
+        )
+
+    if subtitles:
+        instruction.append(
+            f"Take into account the transcript of the segment. Summarize the topic of the conversation. Here is the transcript of the segment: {subtitles}."
+        )
+    return instruction

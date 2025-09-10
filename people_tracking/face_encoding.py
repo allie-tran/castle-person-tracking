@@ -23,7 +23,7 @@ def get_encodings(train_dir, save_file=None):
             yes = inputimeout(
                 f"""Face encodings file {save_file} already exists.
 Type 'y' to load from file, or any other key to generate new encodings: """,
-                timeout=10
+                timeout=5
             ).strip().lower()
         except TimeoutOccurred:
             yes = "y" # Default to loading if no input is given

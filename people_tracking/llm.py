@@ -1,29 +1,19 @@
-import asyncio
-import base64
 import json
 import os
 from collections.abc import Sequence
-from typing import AsyncGenerator, Dict, Generator, List, Literal, Optional
-
-from openai import AsyncOpenAI, BaseModel, OpenAI
-from openai.types.chat import (
-    ChatCompletionContentPartImageParam,
-    ChatCompletionContentPartParam,
-    ChatCompletionContentPartTextParam,
-    ChatCompletionMessageParam,
-    ChatCompletionSystemMessageParam,
-    ChatCompletionUserMessageParam,
-)
-from openai.types.chat.chat_completion_content_part_image_param import ImageURL
-from partialjson.json_parser import JSONParser
-from pyrate_limiter import BucketFullException, Duration, Limiter, Rate
-from rich import print
+from typing import Dict, List, Literal, Optional
 
 from dotenv import load_dotenv
+from google import genai  # type: ignore
+from google.genai.types import Content, GenerateContentConfig, Part  # type: ignore
+from partialjson.json_parser import JSONParser
+from pydantic import BaseModel
+from pyrate_limiter import Duration, Limiter, Rate
+from rich import print
 
 load_dotenv()
 
-DEBUG = True
+DEBUG = False
 JSON_START_FLAG = "```json"
 JSON_END_FLAG = "```"
 
@@ -34,33 +24,33 @@ rate = Rate(3, Duration.SECOND)
 limiter = Limiter(rate)
 
 # Set up ChatGPT generation model
-OPENAI_API = os.environ.get("OPENAI_API", "")
-MODEL_NAME = os.environ.get("MODEL_NAME", "")
+GEMINI = os.environ.get("GEMINI_API", "")
+MODEL_NAME = os.environ.get("GEMINI_MODEL_NAME", "")
 
 
 class MixedContent(BaseModel):
     type: Literal["text", "image_url"]
-    content: str
+    content: str | bytes
 
 
 class LLM:
     # Set up the template messages to use for the completion
-    template_message: ChatCompletionMessageParam = ChatCompletionSystemMessageParam(
-        role="system", content="You are a useful assistant."
-    )
+    system_instruction: str = "You are a helpful assistant."
 
     def __init__(self):
-        self.client = OpenAI(api_key=OPENAI_API)
+        self.client = genai.Client(api_key=GEMINI)
         self.model_name = MODEL_NAME
 
-    def generate(self, messages: List[ChatCompletionMessageParam], parse_json=False):
+    def generate(self, contents: Content, parse_json=False):
         """
         Generate completions from a list of messages
         """
-        request = self.client.chat.completions.create(
-            model=self.model_name, messages=messages
+        request = self.client.models.generate_content(
+            model=self.model_name,
+            contents=contents,
+            config=GenerateContentConfig(system_instruction=self.system_instruction),
         )
-        response = request.choices[0].message.content
+        response = request.text
         if DEBUG:
             print("GPT", response)
         if parse_json and response:
@@ -89,31 +79,22 @@ class LLM:
         Then parse the JSON object from the completion
         If the completion is not a JSON object, return the text
         """
-        messages = [self.template_message]
-        messages.append(ChatCompletionUserMessageParam(role="user", content=text))
-        return self.generate(messages, parse_json)
+        contents = Content(role="user", parts=[Part.from_text(text=text)])
+        return self.generate(contents, parse_json)
 
     def generate_from_mixed_media(
         self, data: Sequence[MixedContent], parse_json=False
     ) -> Optional[Dict | str]:
-        messages = [self.template_message]
-        content: List[ChatCompletionContentPartParam] = []
+        parts: List[Part] = []
         for part in data:
             if part.type == "text":
-                content.append(
-                    ChatCompletionContentPartTextParam(text=part.content, type="text")
-                )
+                parts.append(Part.from_text(text=part.content))
             elif part.type == "image_url":
-                content.append(
-                    ChatCompletionContentPartImageParam(
-                        image_url=ImageURL(url=part.content), type="image_url"
-                    )
-                )
-        messages.append(ChatCompletionUserMessageParam(role="user", content=content))
-        return self.generate(messages, parse_json=parse_json)
+                parts.append(Part.from_bytes(data=part.content, mime_type="image/jpeg"))
+        return self.generate(Content(role="user", parts=parts), parse_json=parse_json)
 
 
-def get_openai_visual_messages(image_paths: List[str | bytes]) -> List[MixedContent]:
+def get_visual_content(image_paths: List[str] | List[bytes]) -> List[MixedContent]:
     """
     Get a visual message for OpenAI from a list of image paths.
     """
@@ -123,13 +104,13 @@ def get_openai_visual_messages(image_paths: List[str | bytes]) -> List[MixedCont
     messages = []
     for image_path in image_paths:
         try:
-            base64_code = base64.b64encode(
-                open(image_path, "rb").read() if isinstance(image_path, str) else image_path
-            ).decode("utf-8")
-            bs64_image = f"data:image/jpeg;base64,{base64_code}"
-            messages.append(MixedContent(type="image_url", content=bs64_image))
+            image_bytes = (
+                open(image_path, "rb").read()
+                if isinstance(image_path, str)
+                else image_path
+            )
+            messages.append(MixedContent(type="image_url", content=image_bytes))
         except OSError as e:
             print(f"Error reading image {image_path}: {e}")
             continue
-
     return messages

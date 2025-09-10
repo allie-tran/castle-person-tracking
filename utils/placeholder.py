@@ -3,7 +3,7 @@ from PIL import Image
 import hashlib
 
 placeholder_hash = imagehash.phash(
-    Image.open("/mnt/castle/processed/placeholder.png").convert("L")
+    Image.open("/mnt/ssd0/castle/processed/placeholder.png").convert("L")
 )  # Load the placeholder image and compute its hash
 
 

@@ -1,0 +1,12 @@
+[tool.pyright]
+include = ["."]
+exclude = ["**/__pycache__",
+    "person_tracking_output",
+    "tracking_output_jpg",
+    "*.pt*",
+    "*.pkl",
+    "groundtruth",
+]
+pythonVersion = "3.11"
+pythonPlatform = "Linux"
+

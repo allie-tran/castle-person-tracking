@@ -13,6 +13,10 @@ load_dotenv()
 client = MongoClient("localhost", 27017)
 db = client["castle"]
 transcripts_col = db["transcripts"]
+try:
+    transcripts_col.create_index([("person", 1), ("day", 1), ("start", 1)], unique=False)
+except Exception as e:
+    print(f"Index creation failed: {e}")
 
 ROOT_DIR = "/mnt/castle/castle_downloader/CASTLE2024/main"
 

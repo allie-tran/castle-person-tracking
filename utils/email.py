@@ -17,18 +17,21 @@ def send_email(subject: str, body: str, to_email: str = ALERT_EMAIL):
     Sends an email with the specified subject and body to the given email address.
     Defaults to ALERT_EMAIL if no recipient is specified.
     """
-    assert EMAIL is not None, "EMAIL environment variable not set"
-    assert PASSWORD is not None, "PASSWORD environment variable not set"
+    try:
+        assert EMAIL is not None, "EMAIL environment variable not set"
+        assert PASSWORD is not None, "PASSWORD environment variable not set"
 
-    # Create the email message
-    msg = EmailMessage()
-    msg['Subject'] = subject
-    msg['From'] = EMAIL
-    msg['To'] = to_email
-    msg.set_content(body)
-    # Send the email
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-        smtp.starttls()
-        smtp.login(EMAIL, PASSWORD)
-        smtp.send_message(msg)
-    print(f"Email sent successfully to {to_email}!")
+        # Create the email message
+        msg = EmailMessage()
+        msg['Subject'] = subject
+        msg['From'] = EMAIL
+        msg['To'] = to_email
+        msg.set_content(body)
+        # Send the email
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+            smtp.starttls()
+            smtp.login(EMAIL, PASSWORD)
+            smtp.send_message(msg)
+        print(f"Email sent successfully to {to_email}!")
+    except Exception as e:
+        print(f"Failed to send email: {e}")

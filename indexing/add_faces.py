@@ -40,7 +40,7 @@ for folder in os.listdir(TRACKING_OUTPUT_DIR):
                 collection.update_one(
                     {"image": image_key},
                     {"$set": {
-                        "people_present": [name for name in data],
+                        "people_present": [name["name"] for name in data],
                         "faces": data,
                     }},
                     upsert=True

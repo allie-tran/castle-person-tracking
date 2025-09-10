@@ -2,6 +2,7 @@ from collections import Counter, defaultdict
 import json
 import cv2
 from ultralytics import YOLO
+import traceback
 import numpy as np
 from deepface import DeepFace
 import os  # Import os for listing directory contents
@@ -26,7 +27,7 @@ from people_tracking.people_reid import (
     merge_track_ids,
 )
 from utils.placeholder import is_similar_placeholder
-from utils.email import send_email
+
 
 # --- CONFIGURATION ---
 FIXED_SIZE = (1280, 720)  # Fixed size for resizing images
@@ -46,9 +47,6 @@ KNOWN_FACE_DATABASE = "groundtruth"
 FACE_VERIFY_THRESHOLD = (
     0.5  # 0.68 = DeepFace's default for ArcFace/cosine. Lower is stricter.
 )
-
-# For shot segmentation
-SHOT_SEGMENTATION_PATH = "/mnt/castle/processed/webp_segments.json"
 
 # --- Input Configuration ---
 # python person_track.py --key <key> <path_to_images> [<output_folder>]
@@ -85,8 +83,9 @@ person = args.person
 key = f"{day}_{person}"
 shot_segment_key = f"{day}/{person}"
 # image_path = f"/mnt/castle/castle_downloader/keyframes/{day}/{person}"
-image_path = f"/mnt/castle/Images/CASTLE/{day}/{person}"
+image_path = f"lone_5fps/{day}/{person}"
 IMAGE_FOLDER_PATH = image_path
+FPS = 5
 
 # Ensure the image folder exists
 if not os.path.exists(IMAGE_FOLDER_PATH):
@@ -200,49 +199,6 @@ metadata_exists = create_metadata_file(
     overwrite_existing=args.overwrite,
 )
 
-# Load segments
-
-# def webp_name_to_jpg_name(webp_name):
-#     """
-#     Convert a webp image name to jpg format.
-#     """
-#     webp_name = webp_name.split(".")[0]
-#     day, person, time = webp_name.split("/")
-#     hour, seconds = time.split("_")
-#     seconds = int(seconds)
-#     # 2fps for jpg
-#     return [f"{day}/{person}/{hour}_{seconds * 2}.jpg",
-#             f"{day}/{person}/{hour}_{seconds * 2 + 1}.jpg"]
-
-shot_segments = []
-if os.path.exists(SHOT_SEGMENTATION_PATH):
-    with open(SHOT_SEGMENTATION_PATH, "r") as f:
-        webp_segments = json.load(f).get(shot_segment_key, [])
-        shot_segments = webp_segments
-#         # list of "day1/Allie/20_960.webp"
-#         shot_segments = []
-#         for segment in webp_segments:
-#             jpg_segment = []
-#             for image in segment:
-#                 jpg_segment.extend(webp_name_to_jpg_name(image))
-#             shot_segments.append(jpg_segment)
-if not shot_segments:
-    rprint(
-        f"[red]No shot segments found for {shot_segment_key} in {SHOT_SEGMENTATION_PATH}.[/red]"
-    )
-    exit(1)
-
-print("[blue]Shot segments loaded:[/blue]")
-for segment in shot_segments[:10]:
-    print(segment)
-
-frame_to_segment = {}
-# Create a mapping from frame index to segment ID
-for segment_id, segment in enumerate(shot_segments):
-    for frame_name in segment:
-        # Extract the frame index from the filename
-        frame_to_segment[frame_name] = segment_id
-
 # Load subttitles
 subtitles = get_subtitles_for_day(day, person)
 
@@ -271,14 +227,14 @@ if os.path.exists(to_skips_path):
     with open(to_skips_path, "r") as f:
         to_skips = {int(line.strip()) for line in f if line.strip().isdigit()}
 
-rprint(
-    f"[blue]Loaded {len(to_skips)} skipped frames from {to_skips_path}.[/blue]"
-)
+rprint(f"[blue]Loaded {len(to_skips)} skipped frames from {to_skips_path}.[/blue]")
+
 
 def skip_frame(frame_idx):
     to_skips.add(frame_idx)
     with open(to_skips_path, "a") as f:
         f.write(f"{frame_idx}\n")
+
 
 # --- Processing images and creating track IDs ---
 pbar = tqdm(total=len(image_paths), desc="Creating track IDs", unit="image(s)")
@@ -307,7 +263,11 @@ try:
         # Get YOLOv8 detections, tracks, AND MASKS
         # The 'results' object will contain masks if yolov8n-seg.pt is used
         results = yolo_model.track(
-            frame, persist=True, conf=PERSON_CONF_THRESHOLD, classes=0, verbose=False,
+            frame,
+            persist=True,
+            conf=PERSON_CONF_THRESHOLD,
+            classes=0,
+            verbose=False,
         )
 
         # Initialize a blank canvas for drawing all segmentation masks in this frame
@@ -382,16 +342,18 @@ try:
                         break  # Only take the first detected face
 
                     pred_probs.append(prob)
-                    tracking_output.append((
-                        metadata_dir,
-                        frame_idx,
-                        track_id,
-                        (x1, y1, x2, y2),
-                        person_feat,
-                        face_bboxes,
-                        potential_id,
-                        all_masks_data[i] if all_masks_data is not None else None,
-                    ))
+                    tracking_output.append(
+                        (
+                            metadata_dir,
+                            frame_idx,
+                            track_id,
+                            (x1, y1, x2, y2),
+                            person_feat,
+                            face_bboxes,
+                            potential_id,
+                            all_masks_data[i] if all_masks_data is not None else None,
+                        )
+                    )
 
         # Process the tracking output
         if len(pred_probs) > 0:
@@ -448,7 +410,8 @@ mean_features = defaultdict(list)
 for track_id, feature in zip(track_ids, features):
     mean_features[track_id].append(feature)
 mean_features = {
-    track_id: np.mean(np.array(feats), axis=0) for track_id, feats in mean_features.items()
+    track_id: np.mean(np.array(feats), axis=0)
+    for track_id, feats in mean_features.items()
 }
 track_id_to_bboxes = defaultdict(list)
 for track_id, bbox in zip(track_ids, bboxes):
@@ -483,9 +446,7 @@ for cluster_id, track_ids in clustered_track_ids.items():
         most_common_name, _ = Counter(all_names).most_common(1)[0]
         cluster_to_names[cluster_id] = most_common_name
 
-    track_id_to_cluster.update(
-        {track_id: cluster_id for track_id in track_ids}
-    )
+    track_id_to_cluster.update({track_id: cluster_id for track_id in track_ids})
 
 
 # --- CREATE FINAL METADATA ---
@@ -493,52 +454,61 @@ for cluster_id, track_ids in clustered_track_ids.items():
 # - a list of track_ids
 # - each track_id has 1 name, 1 bbox, and 1 face_bbox
 final_metadata_path = os.path.join(OUTPUT_FOLDER_PATH, key, "final_metadata.json")
-final_metadata = [{
+final_metadata = [
+    {
         "image_path": image_path,
         "track_ids": [],
-    } for image_path in image_paths
-                  ]
+    }
+    for image_path in image_paths
+]
 
 for row in tracking_data:
     frame_id = row["frame_id"]
     track_id = row["track_id"]
-    name = cluster_to_names.get(
-        track_id_to_cluster.get(track_id, None), "Unknown"
-    )
+    name = cluster_to_names.get(track_id_to_cluster.get(track_id, None), "Unknown")
     # Ensure the frame_id is within bounds
     if frame_id < len(final_metadata):
-        final_metadata[frame_id]["track_ids"].append({
-            "name": name,
-            **row
-        })
+        final_metadata[frame_id]["track_ids"].append({"name": name, **row})
 
 # Save the final metadata to a JSON file
 import json
+
 with open(final_metadata_path, "w") as f:
     json.dump(final_metadata, f, indent=4)
 
 # --- VISUALIZATION SETUP ---
-rprint("[blue]Setting up visualization...[/blue]")
+rprint("[blue]Creating outputs...[/blue]")
 # --- NEW: Iterate through the CSV rows and frames at the same time and visualize ---
-fps = 8
-overlay_video = cv2.VideoWriter(
-    out_video_path,
-    cv2.VideoWriter_fourcc(*"mp4v"),  # type: ignore
-    fps,  # Frame rate
-    FIXED_SIZE,  # Frame size
-)
-mask_video = cv2.VideoWriter(
-    os.path.join(OUTPUT_FOLDER_PATH, key, "masks.mp4"),
-    cv2.VideoWriter_fourcc(*"mp4v"),  # type: ignore
-    fps,  # Frame rate
-    FIXED_SIZE,  # Frame size
-)
+OUTPUT_VIDEO = True
+overlay_video = None
+mask_video = None
+if OUTPUT_VIDEO:
+    fps = 8
+    overlay_video = cv2.VideoWriter(
+        out_video_path,
+        cv2.VideoWriter_fourcc(*"mp4v"),  # type: ignore
+        fps,  # Frame rate
+        FIXED_SIZE,  # Frame size
+    )
+    mask_video = cv2.VideoWriter(
+        os.path.join(OUTPUT_FOLDER_PATH, key, "masks.mp4"),
+        cv2.VideoWriter_fourcc(*"mp4v"),  # type: ignore
+        fps,  # Frame rate
+        FIXED_SIZE,  # Frame size
+    )
+    rprint(f"[blue]Output video will be saved to {out_video_path}[/blue]")
 
-rprint(f"[blue]Output video will be saved to {out_video_path}[/blue]")
-current_segment_id = 0
-current_frames: list[str] = []  # List to store frames for the current segment
-current_overlays: list[np.ndarray] = []
+# Prepare the output directory for descriptions
+descriptions_path = os.path.join(OUTPUT_FOLDER_PATH, key, "descriptions.json")
 descriptions = []
+skip_descriptions = set()
+if os.path.exists(descriptions_path):
+    with open(descriptions_path, "r") as f:
+        descriptions = json.load(f)
+    skip_descriptions: set[str] = {
+        desc["start"] for desc in descriptions
+    }
+
 
 def to_key(frame_idx) -> str:
     """
@@ -548,22 +518,39 @@ def to_key(frame_idx) -> str:
     key = "/".join(key)
     return key
 
+WINDOW_SIZE = FPS * 30  # 60 seconds window
+SLIDING_WINDOW_STEP = FPS * 15   # 10 seconds step
 
 try:
-    for segment_id, segment in enumerate(shot_segments):
+    # Create a sliding window over the final metadata
+    pbar = tqdm(
+        total=len(final_metadata) // SLIDING_WINDOW_STEP,
+        desc="Processing segments",
+        unit="segment(s)",
+    )
+    shot_segments = []
+    for start in range(0, len(final_metadata), SLIDING_WINDOW_STEP):
+        pbar.update(1)
+        end = start + WINDOW_SIZE
+        if end > len(final_metadata):
+            end = len(final_metadata)
         pbar.set_description(
-            f"Processing segment {segment_id + 1}/{len(shot_segments)}"
+            f"[blue]Processing segment {len(shot_segments) + 1}: {start} to {end}[/blue]"
         )
+        image_start = to_key(start)
+        image_end = to_key(end - 1)
+        if not OUTPUT_VIDEO and image_start in skip_descriptions:
+            continue
+
         current_frames = []
         current_overlays = []  # Reset current overlays for the new segment
-        for image_name in segment:
-            current_frame_idx = image_paths.index(
-                os.path.join(IMAGE_FOLDER_PATH, image_name.split("/")[-1])
-            )
+        for current_frame_idx in range(start, end):
             # Reset the frame and segmented_frame for the new segment
             frame = cv2.imread(image_paths[current_frame_idx])
             if frame is None:
-                rprint(f"[red]Could not read image {image_paths[current_frame_idx]}.[/red]")
+                rprint(
+                    f"[red]Could not read image {image_paths[current_frame_idx]}.[/red]"
+                )
                 continue
             frame = cv2.resize(frame, FIXED_SIZE, interpolation=cv2.INTER_LINEAR)
             segmented_frame = np.zeros_like(frame, dtype=np.uint8)
@@ -579,7 +566,7 @@ try:
 
                 # Draw the bounding boxes
                 x1, y1, x2, y2 = person_bbox
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 1)
                 fx1, fy1, fx2, fy2 = face_bbox
                 if (fx1, fy1, fx2, fy2) != (0, 0, 0, 0):
                     # Draw the face bounding box
@@ -588,60 +575,74 @@ try:
                     abs_fx2 = x1 + fx2
                     abs_fy2 = y1 + fy2
                     cv2.rectangle(
-                        frame, (abs_fx1, abs_fy1), (abs_fx2, abs_fy2), (0, 255, 255), 2
+                        frame, (abs_fx1, abs_fy1), (abs_fx2, abs_fy2), (0, 255, 255), 1
                     )
                 # Draw the name just below the bounding box (top-left corner)
                 putText(
                     frame,
                     f"{display_name} ({track_id})",
-                    (x1, y2),
+                    (x1, y1),
                     (0, 255, 0),  # Green text
                 )
             # Add the current frame to the overlay
             overlay = cv2.addWeighted(frame, 1, segmented_frame, alpha, 0)
-            # Write the final frame to the output video
-            overlay_video.write(overlay)
-            mask_video.write(segmented_frame)
             current_overlays.append(overlay)
             current_frames.append(image_paths[current_frame_idx])
+
+            if OUTPUT_VIDEO:
+                # Write the final frame to the output video
+                if overlay_video is not None:
+                    overlay_video.write(overlay)
+                if mask_video is not None:
+                    mask_video.write(segmented_frame)
 
         # Check if we have any frames to process
         if not current_frames:
             rprint(f"[red]No frames found for segment {segment_id}. Skipping...[/red]")
             continue
+
+        if image_start in skip_descriptions:
+            continue
+
         # Get the description for the current segment
         pbar.set_description(
             f"Getting description for segment {segment_id + 1} ({len(current_frames)} frames)"
         )
-        description = get_captions_from_frames(
-            current_overlays,
-            get_prompt_for_camera(person, gather_subtitles(current_frames, subtitles)),
-        )
-        descriptions.append((segment_id, shot_segments[segment_id][0], description))
-        rprint(
-            f"[green]Segment {segment_id} description: {description}[/green]"
-        )
 
+        # description = get_captions_from_frames(
+        #     current_overlays,
+        #     get_prompt_for_camera(
+        #         person, gather_subtitles(current_frames, subtitles, fps=FPS)
+        #     ),
+        # )
+        # descriptions.append(
+        #     {
+        #         "start": image_start,
+        #         "end": image_end,
+        #         "description": description,
+        #     }
+        # )
+        # rprint(f"[blue]{image_start} to {image_end}: {description}[/blue]")
 
 except KeyboardInterrupt:
     print("[orange]Processing interrupted by user.[/orange]")
 except Exception as e:
-    rprint("[red]An error occurred during processing:[/red]", e)
+    rprint("[red]An error occurred during processing:[/red]")
+    traceback.print_exc()
 
 rprint("[blue]Saving current progress...[/blue]")
-overlay_video.release()
-mask_video.release()
+if OUTPUT_VIDEO:
+    if overlay_video is not None:
+        overlay_video.release()
+    if mask_video is not None:
+        mask_video.release()
 cv2.destroyAllWindows()
 
-import csv
-descriptions_path = os.path.join(OUTPUT_FOLDER_PATH, key, "descriptions.csv")
-with open(descriptions_path, "w", newline="") as csvfile:
-    csv_writer = csv.writer(csvfile)
-    csv_writer.writerow(["segment_id", "segment_name", "description"])
-    for segment_id, segment_name, description in descriptions:
-        csv_writer.writerow([segment_id, segment_name, description])
+# --- Save the descriptions to a JSON file ---
+with open(descriptions_path, "w") as f:
+    json.dump(descriptions, f, indent=4)
 
-send_email(
-    subject=f"Person Tracking Completed for {day} - {person}",
-    body=f"Tracking completed for {day} - {person}. Metadata saved to {final_metadata_path}.",
-)
+# send_email(
+#     subject=f"Person Tracking Completed for {day} - {person}",
+#     body=f"Tracking completed for {day} - {person}. Metadata saved to {final_metadata_path}.",
+# )
