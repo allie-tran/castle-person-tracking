@@ -7,21 +7,18 @@ import numpy as np
 from collections import defaultdict, Counter
 from tqdm import tqdm
 from ultralytics import YOLO
-import torch
-from people_tracking.face_reid import assign_faces_per_frame
-from people_tracking.people_reid import extract_person_features, merge_track_ids
-from people_tracking.utils import save_raw_tracking_output, load_raw_tracking_output, create_metadata_file, get_id_color, putText
-from custom_face_reid import get_face_embedding_from_crop, classify_face_embedding, NUM_KNOWN_FACES, PEOPLE_NAMES
+import shutil
+from people_tracking.people_track_reid import extract_person_features, get_face_data, merge_track_ids
+from people_tracking.utils import save_raw_tracking_output, load_raw_tracking_output, create_metadata_file, get_id_color
+from people_tracking.face_reid import get_face_embedding_from_crop, classify_face_embedding, PEOPLE_NAMES
 
 # ---------------- CONFIG ----------------
-YOLO_MODEL_PATH = "yolo11n-seg.pt"
-YOLO_FACE_MODEL = "yolov12n-face.pt"  # pretrained face model
+YOLO_MODEL_PATH = "models/yolo11n-seg.pt"
+YOLO_FACE_MODEL = "models/yolov12n-face.pt"  # pretrained face model
 PERSON_CONF_THRESHOLD = 0.5
 FACE_CONF_THRESHOLD = 0.5
 FACE_VERIFY_THRESHOLD = 0.5
-KNOWN_FACE_DATABASE = "groundtruth"
 SMALL_SIZE = (1280, 720)
-
 
 # ---------------- CLI ----------------
 import argparse
@@ -42,76 +39,6 @@ os.makedirs(metadata_dir, exist_ok=True)
 yolo = YOLO(YOLO_MODEL_PATH, task="segment", verbose=False)
 yolo_face = YOLO(YOLO_FACE_MODEL, task="detect", verbose=False)
 
-# ---------------- HELPERS ----------------
-def get_face_data(person_crop):
-    # dfs = DeepFace.represent(
-    #     img_path=person_crop,
-    #     model_name="Facenet512",
-    #     enforce_detection=False,
-    #     detector_backend="yolov8",
-    #     normalization="Facenet2018",
-    # )
-
-    # predict_probs = []
-    # frame_face_encodings = []
-    # for df in dfs:
-    #     confidence = df["face_confidence"]
-    #     threshold = 0.5
-    #     if confidence < threshold:
-    #         continue
-    #     face = df["facial_area"]
-    #     x, y, w, h = face["x"], face["y"], face["w"], face["h"]
-    #     top, right, bottom, left = y, x + w, y + h, x
-
-    #     crop = person_crop[top:bottom, left:right]
-    #     if crop.size == 0:
-    #         continue
-    #     frame_face_encodings.append({
-    #         "bbox": (x, y, w, h),
-    #         "face": crop
-    #     })
-
-    # return frame_face_encodings
-
-
-    out = []
-    try:
-        results = yolo_face.predict(person_crop, conf=FACE_CONF_THRESHOLD, verbose=False)
-        out = []
-        if not results or len(results[0].boxes) == 0:
-            return []
-
-        boxes = results[0].boxes.xyxy.cpu().numpy()
-        scores = results[0].boxes.conf.cpu().numpy()
-        h_img, w_img = person_crop.shape[:2]
-
-        for box, score in zip(boxes, scores):
-            if score < FACE_CONF_THRESHOLD:
-                continue
-
-            x1, y1, x2, y2 = map(int, box)
-            # clamp to image bounds
-            x1 = max(0, x1)
-            y1 = max(0, y1)
-            x2 = min(w_img, x2)
-            y2 = min(h_img, y2)
-
-
-            w, h = x2 - x1, y2 - y1
-            if w*h < 400:  # ignore very small faces
-                continue
-
-            crop = person_crop[y1:y2, x1:x2]
-            if crop.size == 0:
-                continue
-
-            # # BGR -> RGB and normalize
-            crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-            out.append({"bbox": (x1, y1, w, h), "face": crop})
-        return out
-    except Exception:
-        return []
-
 # ---------------- VIDEO IO ----------------
 cap = cv2.VideoCapture(args.video)
 if not cap.isOpened():
@@ -129,7 +56,6 @@ pbar = tqdm(total=total_frames, desc="Tracking")
 track_evidence = defaultdict(lambda: {"embeddings": [], "probs": [], "frames": [], "bboxes": []})
 skip_seconds = 0
 end_seconds = 0
-
 
 while True:
     try:
@@ -160,7 +86,7 @@ while True:
                     continue
 
                 features = extract_person_features([crop])
-                faces = get_face_data(crop)
+                faces = get_face_data(yolo_face, crop, face_conf_threshold=FACE_CONF_THRESHOLD)
                 face_id = None
                 probs = [0.0] * len(PEOPLE_NAMES)
                 face_bbox = (0, 0, 0, 0)
@@ -171,7 +97,7 @@ while True:
                     embedding = get_face_embedding_from_crop(faces[0]["face"])
                     if embedding is None:
                         continue
-                    face_id, probs = classify_face_embedding(embedding)
+                    face_id, _ = classify_face_embedding(embedding)
                     face_bbox = faces[0]["bbox"]
                     track_evidence[track_id]["embeddings"].append(embedding)
                     track_evidence[track_id]["probs"].append(probs)
@@ -179,14 +105,8 @@ while True:
                 track_evidence[track_id]["frames"].append(frame_idx)
                 track_evidence[track_id]["bboxes"].append((x1, y1, x2, y2))
 
-                pred_probs.append(probs)
                 tracking_rows.append((metadata_dir, frame_idx, int(track_id), (x1,y1,x2,y2), features, face_bbox, face_id, masks[i] if masks is not None else None))
 
-        # if pred_probs:
-        #     assignments = assign_faces_per_frame(pred_probs, PEOPLE_NAMES)
-        #     for i, row in enumerate(tracking_rows):
-        #         face_id = assignments.get(i, row[6])
-        #         save_raw_tracking_output(*(row[:6] + (face_id,) + row[7:]))
         for row in tracking_rows:
             save_raw_tracking_output(*row)
 
@@ -200,7 +120,6 @@ cap.release()
 
 # ---------------- NORMALIZE IDS ----------------
 tracking_data = load_raw_tracking_output(metadata_dir)
-
 mean_embeddings = {tid: np.mean(np.stack(ev["embeddings"]), axis=0)
                    for tid, ev in track_evidence.items() if ev["embeddings"]}
 track_id_to_frames = {tid: ev["frames"] for tid, ev in track_evidence.items()}
@@ -215,27 +134,30 @@ for tid, ev in track_evidence.items():
         track_id_to_label[tid] = "Unknown"
         continue
 
-    all_embeddings = np.stack(embeddings)
-    centroid = np.mean(all_embeddings, axis=0)
-    centroid = centroid / np.linalg.norm(centroid)
-    s_i = np.dot(all_embeddings, centroid)
-    filtered_indices = np.where(s_i >= FACE_VERIFY_THRESHOLD)[0]
-    if len(filtered_indices) == 0:
+    votes = []
+    sims = []
+    confidences = []
+
+    for e in embeddings:
+        pred_label, info = classify_face_embedding(e, sim_threshold=FACE_VERIFY_THRESHOLD, logging=False)
+        if pred_label is not None and info["confidence"] >= 0.5:
+            votes.append(pred_label)
+            sims.append(info['best_sim'])
+            confidences.append(info['confidence'])
+
+    if len(votes) < 2:
         track_id_to_label[tid] = "Unknown"
         continue
 
-    embeddings = [embeddings[i] for i in filtered_indices]
-    avg_embedding = np.mean(np.stack(embeddings), axis=0)
-    pred_label, sims = classify_face_embedding(avg_embedding, sim_threshold=FACE_VERIFY_THRESHOLD, logging=True)
-    track_id_to_label[tid] = pred_label if pred_label is not None else "Unknown"
-    
-    # if ev["probs"]:
-    #     avg_probs = np.mean(np.stack(ev["probs"]), axis=0)
-    #     idx = np.argmax(avg_probs)
-    #     track_id_to_label[tid] = index_to_label[idx] if avg_probs[idx] >= FACE_VERIFY_THRESHOLD else "Unknown"
-    # else:
-    #     track_id_to_label[tid] = "Unknown"
+    label, count = Counter(votes).most_common(1)[0]
 
+    # majority voting
+    if count / len(votes) < 0.6:
+        track_id_to_label[tid] = "Unknown"
+        continue
+
+    track_id_to_label[tid] = label
+    
 cluster_to_label = {}
 for cluster_id, tids in clustered_tracks.items():
     labels = [track_id_to_label[tid] for tid in tids if track_id_to_label[tid] != "Unknown"]
@@ -262,7 +184,7 @@ def draw_label(
     anchor,
     color,
     font=cv2.FONT_HERSHEY_SIMPLEX,
-    font_scale=0.8,
+    font_scale=0.9,
     thickness=2,
     pad=4
 ):
@@ -308,7 +230,7 @@ def draw_label(
         (x_text, y_text),
         font,
         font_scale,
-        (255, 255, 255),
+        (0, 0, 0),
         thickness,
         cv2.LINE_AA
     )
@@ -364,6 +286,5 @@ if not args.no_video:
     overlay_video.release()
 print("Done.")
 
-# # Clean up and only keep final metadata and video
-# import shutil
-# shutil.rmtree(metadata_dir)
+# Clean up and only keep final metadata and video
+shutil.rmtree(metadata_dir)
