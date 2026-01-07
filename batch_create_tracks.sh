@@ -11,7 +11,7 @@ do
                 echo "Skipping $day $people $hour, already done"
                 continue
             fi
-            python3 person_track_video.py --person "$people" --day "$day" --no_video --output_folder video_output --video "$VIDEO_DIR"/"$day"/"$people"/"$hour".mp4
+            python3 person_track_video.py --person "$people" --day "$day" --hour "$hour" --no_video --output_folder video_output --video "$VIDEO_DIR"/"$day"/"$people"/"$hour".mp4
         done
     done
 done
