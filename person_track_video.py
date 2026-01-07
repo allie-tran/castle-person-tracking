@@ -98,7 +98,7 @@ while True:
                     embedding = get_face_embedding_from_crop(faces[0]["face"])
                     if embedding is None:
                         continue
-                    face_id, _ = classify_face_embedding(embedding)
+                    # face_id, _ = classify_face_embedding(embedding)
                     face_bbox = faces[0]["bbox"]
                     track_evidence[track_id]["embeddings"].append(embedding)
                     track_evidence[track_id]["probs"].append(probs)
