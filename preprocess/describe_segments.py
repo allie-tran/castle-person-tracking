@@ -1,3 +1,4 @@
+from collections import defaultdict
 import pandas as pd
 import random
 import traceback
@@ -51,6 +52,8 @@ if os.path.exists(description_path):
     descriptions_df = pd.read_csv(description_path)
     descriptions = descriptions_df['description'].tolist()
     print("Loaded", len(descriptions), "descriptions.")
+
+assert len(descriptions) <= len(segment_info), "More descriptions than segments!"
 
 try:
     for i, segment in tqdm(enumerate(segment_info), total=len(segment_info)):
@@ -115,6 +118,8 @@ for i, segment in enumerate(segment_info):
     desc = descriptions[i]
     start_time = segments.iloc[i]['start_time']
     end_time = segments.iloc[i]['end_time']
+    event_id = segments.iloc[i]['event_id']
+    hour = segments.iloc[i]['hour']
     day = segments.iloc[i]['day']
     owner = segments.iloc[i]['owner']
 
@@ -133,6 +138,10 @@ for i, segment in enumerate(segment_info):
         'description': possible_categories[0] if possible_categories else 'Unclear',
         'start_time': start_time,
         'end_time': end_time,
+        'start_seconds': int(hour) * 3600 + start_time,
+        'end_seconds': int(hour) * 3600 + end_time,
+        'hour': hour,
+        'event_id': event_id,
     })
 
 
@@ -145,7 +154,120 @@ for day in all_days:
 
 for day in all_days:
     for person in organized_segments[day].keys():
+        added = 0
         day_person_segments = organized_segments[day][person]
+        start_time = min([seg['start_seconds'] for seg in day_person_segments])
+        # round down to nearest hour
+        start_time = (start_time // 3600) * 3600
+        end_time = max([seg['end_seconds'] for seg in day_person_segments])
+        # round up to nearest hour
+        end_time = ((end_time + 3599) // 3600) * 3600
+
+        # Insert empty segments for gaps
+        new_segments = []
+        hour_covered = defaultdict(int)
+        if day_person_segments[0]['start_seconds'] > start_time:
+            new_segments.append({
+                'segment_index': -1,
+                'description': 'No Activity',
+                'start_time': 0,
+                'end_time': day_person_segments[0]['start_time'],
+                'start_seconds': start_time,
+                'end_seconds': day_person_segments[0]['start_seconds'],
+                'hour': start_time // 3600,
+                'event_id': -1,
+            })
+            added += 1
+            hour_covered[start_time // 3600] += start_time
+
+        new_segments.append(day_person_segments[0])
+        for i in range(len(day_person_segments) - 1):
+            j = i + 1
+            if day_person_segments[i]['end_seconds'] < day_person_segments[j]['start_seconds']:
+                new_segments.append({
+                    'segment_index': -1,
+                    'description': 'No Activity',
+                    'start_time': day_person_segments[i]['end_time'],
+                    'end_time': day_person_segments[j]['start_time'],
+                    'start_seconds': day_person_segments[i]['end_seconds'],
+                    'end_seconds': day_person_segments[j]['start_seconds'],
+                    'hour': day_person_segments[i]['hour'],
+                    'event_id': -1,
+                })
+                added += 1
+
+            # Adjust start_time to make sure it's not less than previous end_time
+            if day_person_segments[j]['start_seconds'] < day_person_segments[i]['end_seconds']:
+                day_person_segments[j]['start_seconds'] = day_person_segments[i]['end_seconds']
+                print("Adjusted overlapping segment for", day, person)
+            new_segments.append(day_person_segments[j])
+
+        if day_person_segments[-1]['end_seconds'] < end_time:
+            new_segments.append({
+                'segment_index': -1,
+                'description': 'No Activity',
+                'start_time': day_person_segments[-1]['end_time'],
+                'end_time': end_time - (day_person_segments[-1]['hour'] * 3600),
+                'start_seconds': day_person_segments[-1]['end_seconds'],
+                'end_seconds': end_time,
+                'hour': end_time // 3600 - 1,
+                'event_id': -1,
+            })
+            added += 1
+
+        print(f"Total segments for {day} {person}: {len(day_person_segments)} + {added} added = {len(new_segments)}")
+
+        day_person_segments = new_segments
         day_person_df = pd.DataFrame(day_person_segments)
         os.makedirs(f'organized_segments/{day}', exist_ok=True)
         day_person_df.to_csv(f'organized_segments/{day}/{person}_segments.csv', index=False)
+
+
+        # Use a smoothing window to visualise on the frontend (e.g 1 minute)
+        timeline = []
+        for hour in range(start_time // 3600, end_time // 3600):
+            hour_start = hour * 3600
+            hour_end = (hour + 1) * 3600
+            hour_segments = [seg for seg in day_person_segments if seg['start_seconds'] <= hour_end and seg['end_seconds'] > hour_start]
+            if not hour_segments:
+                timeline.append({
+                    'hour': hour,
+                    'description': 'No Activity',
+                    'start_seconds': hour_start,
+                    'end_seconds': hour_end,
+                })
+                continue
+
+            # Create a second-level timeline for the hour
+            second_timeline = [''] * 3600
+            for seg in hour_segments:
+                if seg['description'] == 'No Activity':
+                    continue
+                seg_start = max(seg['start_seconds'], hour_start) - hour_start
+                seg_end = min(seg['end_seconds'], hour_end) - hour_start
+                for s in range(seg_start, seg_end):
+                    second_timeline[s] = seg['description']
+
+            # Smooth the timeline with a 1-minute window
+            smoothed_timeline = []
+            window_size = 5
+            for s in range(0, 3600, window_size):
+                window = second_timeline[s:s+window_size]
+                window = [w for w in window if w]
+                if window:
+                    most_common = max(set(window), key=window.count)
+                else:
+                    most_common = 'No Activity'
+
+                smoothed_timeline.append({
+                    'hour': hour,
+                    'description': most_common,
+                    'start_seconds': hour_start + s,
+                    'end_seconds': hour_start + s + window_size,
+                })
+
+
+            timeline.extend(smoothed_timeline)
+
+        timeline_df = pd.DataFrame(timeline)
+        timeline_df.to_csv(f'organized_segments/{day}/{person}_timeline.csv', index=False)

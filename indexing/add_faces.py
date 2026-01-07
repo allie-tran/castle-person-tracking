@@ -10,11 +10,11 @@ client = MongoClient("localhost", 27017)
 db = client["castle"]
 collection = db["images"]
 
-image_dir = "/mnt/castle/Images/CASTLE/"
+image_dir = "/mnt/ssd0/Images/CASTLE/"
 
 TRACKING_OUTPUT_DIR = "person_tracking_output"
 for folder in os.listdir(TRACKING_OUTPUT_DIR):
-    person = folder.split("_")[1]
+    day, person = folder.split("_")
     print(f"Processing folder: {folder} for person: {person}")
     if person in PEOPLE:
         metadata_file = os.path.join(TRACKING_OUTPUT_DIR, folder, "final_metadata.json")
@@ -24,7 +24,7 @@ for folder in os.listdir(TRACKING_OUTPUT_DIR):
 
             for frame_data in tqdm(metadata):
                 image_path = frame_data["image_path"]
-                image_key = image_path.replace(image_dir, "")
+                image_key = image_path.replace(image_dir, "").strip("/")
                 track_ids = frame_data["track_ids"]
 
                 data = []

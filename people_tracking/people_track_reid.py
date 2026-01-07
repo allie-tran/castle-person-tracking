@@ -7,6 +7,48 @@ from sklearn.cluster import DBSCAN
 from sklearn.metrics.pairwise import cosine_similarity
 from transformers import CLIPModel, CLIPProcessor
 import torch
+import cv2
+
+# ---------------- FACE DETECTION ----------------
+def get_face_data(yolo_face, person_crop: np.ndarray, face_conf_threshold=0.5) -> list[dict]:
+    out = []
+    try:
+        results = yolo_face.predict(person_crop, conf=face_conf_threshold, verbose=False)
+        out = []
+        if not results or len(results[0].boxes) == 0:
+            return []
+
+        boxes = results[0].boxes.xyxy.cpu().numpy()
+        scores = results[0].boxes.conf.cpu().numpy()
+        h_img, w_img = person_crop.shape[:2]
+
+        for box, score in zip(boxes, scores):
+            if score < face_conf_threshold:
+                continue
+
+            x1, y1, x2, y2 = map(int, box)
+            # clamp to image bounds
+            x1 = max(0, x1)
+            y1 = max(0, y1)
+            x2 = min(w_img, x2)
+            y2 = min(h_img, y2)
+
+
+            w, h = x2 - x1, y2 - y1
+            if w*h < 400:  # ignore very small faces
+                continue
+
+            crop = person_crop[y1:y2, x1:x2]
+            if crop.size == 0:
+                continue
+
+            # # BGR -> RGB and normalize
+            crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+            out.append({"bbox": (x1, y1, w, h), "face": crop})
+        return out
+    except Exception:
+        return []
+
 
 
 class CLIPFeatureExtractor:
@@ -48,22 +90,6 @@ def extract_person_features(crops: list[np.ndarray]) -> np.ndarray:
     if isinstance(features, torch.Tensor):
         features = features.cpu().numpy()
     return features
-
-# def cluster_track_ids(features: np.ndarray, track_ids: list[int]) -> dict[int, set]:
-#     features = features.reshape(features.shape[0], -1)  # Ensure 2D shape
-#     dbscan = DBSCAN(eps=0.1, min_samples=5)
-#     dbscan.fit(features)
-#     labels = dbscan.labels_
-
-#     clustered_track_ids = defaultdict(set)
-#     own_track_id = len(set(labels))  # Unique ID for noise points
-#     for track_id, label in zip(track_ids, labels):
-#         if label == -1:  # noise points
-#             clustered_track_ids[own_track_id].add(track_id)
-#             own_track_id += 1
-#         clustered_track_ids[label].add(track_id)
-#     return clustered_track_ids
-
 
 def track_center(bbox: np.ndarray) -> tuple[float, float]:
     x1, y1, x2, y2 = bbox
