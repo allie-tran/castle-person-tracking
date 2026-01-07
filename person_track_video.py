@@ -26,11 +26,12 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--video", required=True)
 parser.add_argument("--person", required=True)
 parser.add_argument("--day", required=True)
+parser.add_argument("--hour", required=True)
 parser.add_argument("--output_folder", default="tracking_output")
 parser.add_argument("--no_video", action="store_true")
 args = parser.parse_args()
 
-key = f"{args.day}_{args.person}"
+key = f"{args.day}_{args.person}_{args.hour}"
 out_dir = os.path.join(args.output_folder, key)
 metadata_dir = os.path.join(out_dir, "intermediate")
 os.makedirs(metadata_dir, exist_ok=True)
